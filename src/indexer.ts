@@ -16,6 +16,10 @@ export interface Artifact {
   hasSource: boolean;
 }
 
+/**
+ * Singleton class responsible for indexing Maven artifacts.
+ * It scans the local repository, watches for changes, and indexes Java classes.
+ */
 export class Indexer {
   private static instance: Indexer;
   private isIndexing: boolean = false;
@@ -31,6 +35,10 @@ export class Indexer {
     return Indexer.instance;
   }
 
+  /**
+   * Starts watching the local repository for changes.
+   * Debounces changes to trigger re-indexing.
+   */
   public async startWatch() {
     const config = await Config.getInstance();
     const repoPath = config.localRepository;
@@ -69,6 +77,12 @@ export class Indexer {
         });
   }
 
+  /**
+   * Main indexing process.
+   * 1. Scans the file system for Maven artifacts.
+   * 2. Synchronizes the database with found artifacts.
+   * 3. Indexes classes for artifacts that haven't been indexed yet.
+   */
   public async index() {
     if (this.isIndexing) return;
     this.isIndexing = true;
@@ -90,44 +104,32 @@ export class Indexer {
         console.error(`Found ${artifacts.length} artifacts on disk.`);
 
         // 2. Persist artifacts and determine what needs indexing
-        const artifactsToIndex: Artifact[] = [];
+        // We use is_indexed = 0 for new artifacts.
+        const insertArtifact = db.prepare(`
+            INSERT OR IGNORE INTO artifacts (group_id, artifact_id, version, abspath, has_source, is_indexed)
+            VALUES (@groupId, @artifactId, @version, @abspath, @hasSource, 0)
+        `);
 
+        // Use a transaction only for the batch insert of artifacts
         db.transaction(() => {
-            const insertArtifact = db.prepare(`
-                INSERT OR IGNORE INTO artifacts (group_id, artifact_id, version, abspath, has_source)
-                VALUES (@groupId, @artifactId, @version, @abspath, @hasSource)
-            `);
-            const selectId = db.prepare(`
-                SELECT id FROM artifacts 
-                WHERE group_id = @groupId AND artifact_id = @artifactId AND version = @version
-            `);
-            const checkIndexed = db.prepare(`
-                SELECT 1 FROM indexed_artifacts WHERE artifact_id = ?
-            `);
-
             for (const art of artifacts) {
                 insertArtifact.run({
                     ...art,
                     hasSource: art.hasSource ? 1 : 0
                 });
-                const row = selectId.get({
-                    groupId: art.groupId,
-                    artifactId: art.artifactId,
-                    version: art.version
-                }) as { id: number };
-                if (row) {
-                    art.id = row.id;
-                    const isIndexed = checkIndexed.get(art.id);
-                    if (!isIndexed) {
-                        artifactsToIndex.push(art);
-                    }
-                }
             }
         });
 
+        // 3. Find artifacts that need indexing (is_indexed = 0)
+        const artifactsToIndex = db.prepare(`
+            SELECT id, group_id as groupId, artifact_id as artifactId, version, abspath, has_source as hasSource
+            FROM artifacts 
+            WHERE is_indexed = 0
+        `).all() as Artifact[];
+
         console.error(`${artifactsToIndex.length} artifacts need indexing.`);
 
-        // 3. Scan JARs for classes and update DB
+        // 4. Scan JARs for classes and update DB
         const CHUNK_SIZE = 50;
         let processedCount = 0;
         
@@ -148,6 +150,9 @@ export class Indexer {
     }
   }
 
+  /**
+   * Recursively scans a directory for Maven artifacts (POM files).
+   */
   private async scanRepository(rootDir: string): Promise<Artifact[]> {
     const results: Artifact[] = [];
     
@@ -199,6 +204,10 @@ export class Indexer {
     return results;
   }
 
+  /**
+   * Extracts classes from the artifact's JAR and indexes them.
+   * Updates the 'is_indexed' flag upon completion.
+   */
   private async indexArtifactClasses(artifact: Artifact): Promise<void> {
       const jarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
       const db = DB.getInstance();
@@ -209,13 +218,14 @@ export class Indexer {
       } catch {
           // If jar missing, mark as indexed so we don't retry endlessly? 
           // Or maybe it's a pom-only artifact.
-          db.prepare('INSERT OR IGNORE INTO indexed_artifacts (artifact_id) VALUES (?)').run(artifact.id);
+          db.prepare('UPDATE artifacts SET is_indexed = 1 WHERE id = ?').run(artifact.id);
           return;
       }
 
       return new Promise((resolve) => {
           yauzl.open(jarPath, { lazyEntries: true, autoClose: true }, (err, zipfile) => {
               if (err || !zipfile) {
+                  // If we can't open it, maybe it's corrupt. Skip for now.
                   resolve();
                   return;
               }
@@ -251,7 +261,8 @@ export class Indexer {
                               const simpleName = cls.split('.').pop() || cls;
                               insertClass.run(artifact.id, cls, simpleName);
                           }
-                          db.prepare('INSERT OR IGNORE INTO indexed_artifacts (artifact_id) VALUES (?)').run(artifact.id);
+                          // Mark as indexed
+                          db.prepare('UPDATE artifacts SET is_indexed = 1 WHERE id = ?').run(artifact.id);
                       });
                   } catch (e) {
                       console.error(`Failed to insert classes for ${artifact.groupId}:${artifact.artifactId}`, e);
@@ -266,6 +277,9 @@ export class Indexer {
       });
   }
 
+  /**
+   * Checks if a class package is included in the configuration patterns.
+   */
   private isPackageIncluded(className: string, patterns: string[]): boolean {
     if (patterns.length === 0 || (patterns.length === 1 && patterns[0] === '*')) return true;
     for (const pattern of patterns) {
@@ -282,6 +296,9 @@ export class Indexer {
     return false;
   }
 
+  /**
+   * Searches for artifacts by group ID or artifact ID.
+   */
   public search(query: string): Artifact[] {
       // Artifact coordinates search
       const db = DB.getInstance();
@@ -294,6 +311,10 @@ export class Indexer {
       return rows;
   }
 
+  /**
+   * Searches for classes matching the pattern.
+   * Uses Full-Text Search (FTS) for efficient matching.
+   */
   public searchClass(classNamePattern: string): { className: string, artifacts: Artifact[] }[] {
       const db = DB.getInstance();
       
@@ -346,6 +367,9 @@ export class Indexer {
       }
   }
 
+  /**
+   * Retrieves an artifact by its database ID.
+   */
   public getArtifactById(id: number): Artifact | undefined {
       const db = DB.getInstance();
       const row = db.prepare(`

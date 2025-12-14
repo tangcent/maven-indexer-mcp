@@ -27,9 +27,13 @@ export class SourceParser {
     
     // className: com.example.MyClass
     // internalPath: com/example/MyClass.java
-    const internalPath = className.replace(/\./g, '/') + '.java';
+    const basePath = className.replace(/\./g, '/');
+    const candidates = [
+        basePath + '.java',
+        basePath + '.kt'
+    ];
     
-    return new Promise((resolve, reject) => {
+    const result = await new Promise<ClassDetail | null>((resolve, reject) => {
         yauzl.open(jarPath, { lazyEntries: true, autoClose: true }, (err, zipfile) => {
             if (err || !zipfile) {
                 resolve(null);
@@ -40,7 +44,7 @@ export class SourceParser {
 
             zipfile.readEntry();
             zipfile.on('entry', (entry) => {
-                if (entry.fileName === internalPath) {
+                if (candidates.includes(entry.fileName)) {
                     found = true;
                     zipfile.openReadStream(entry, (err, readStream) => {
                         if (err || !readStream) {
@@ -65,6 +69,44 @@ export class SourceParser {
             });
         });
     });
+
+    if (result) {
+        return result;
+    }
+
+    // Fallback to decompilation if source not found in this JAR
+    // Note: This works best if the provided jarPath is the MAIN jar.
+    // If it is the sources jar, decompilation will fail (as it doesn't contain .class files),
+    // returning null.
+    if (type === 'source' || type === 'docs') {
+        return this.decompileClass(jarPath, className);
+    }
+
+    return null;
+  }
+
+  private static async decompileClass(jarPath: string, className: string): Promise<ClassDetail | null> {
+      try {
+          const config = await Config.getInstance();
+          const cfrPath = config.getCfrJarPath();
+          
+          if (!cfrPath || !fs.existsSync(cfrPath)) {
+              // If we can't find CFR, we can't decompile.
+              return null;
+          }
+
+          // Use java -cp cfr.jar:target.jar org.benf.cfr.reader.Main className
+          const classpath = `${cfrPath}${path.delimiter}${jarPath}`;
+          const { stdout } = await execAsync(`java -cp "${classpath}" org.benf.cfr.reader.Main "${className}"`);
+          
+          return {
+              className,
+              source: stdout // Return as source
+          };
+      } catch (e) {
+          // console.error(`CFR failed for ${className} in ${jarPath}:`, e);
+          return null; 
+      }
   }
 
   private static async getSignaturesWithJavap(jarPath: string, className: string): Promise<ClassDetail | null> {

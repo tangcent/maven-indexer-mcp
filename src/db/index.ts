@@ -1,6 +1,5 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import fs from 'fs';
 
 export class DB {
   private static instance: DB;
@@ -30,6 +29,7 @@ export class DB {
         version TEXT NOT NULL,
         abspath TEXT NOT NULL,
         has_source INTEGER DEFAULT 0,
+        is_indexed INTEGER DEFAULT 0,
         UNIQUE(group_id, artifact_id, version)
       );
 
@@ -40,11 +40,15 @@ export class DB {
         tokenize="trigram" 
       );
       
-      -- Helper table to track indexed artifacts to avoid re-indexing unchanged ones (simplification: just track ID)
-      CREATE TABLE IF NOT EXISTS indexed_artifacts (
-          artifact_id INTEGER PRIMARY KEY
-      );
+      -- Cleanup old table if exists
+      DROP TABLE IF EXISTS indexed_artifacts;
     `);
+
+    try {
+      this.db.exec('ALTER TABLE artifacts ADD COLUMN is_indexed INTEGER DEFAULT 0');
+    } catch (e) {
+      // Column likely already exists
+    }
   }
 
   public getDb(): Database.Database {

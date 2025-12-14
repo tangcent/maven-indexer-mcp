@@ -1,15 +1,12 @@
 #!/usr/bin/env node
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
 import path from 'path';
+import { z } from "zod";
 import { Indexer } from "./indexer.js";
 import { SourceParser } from "./source_parser.js";
 
-const server = new Server(
+const server = new McpServer(
   {
     name: "maven-indexer",
     version: "1.0.0",
@@ -29,76 +26,15 @@ indexer.index().then(() => {
     return indexer.startWatch();
 }).catch(err => console.error("Initial indexing failed:", err));
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "search_artifacts",
-        description: "Search for artifacts in the local Maven repository",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: {
-              type: "string",
-              description: "Search query (groupId, artifactId, or keyword)",
-            },
-          },
-          required: ["query"],
-        },
-      },
-      {
-        name: "search_classes",
-        description: "Search for Java classes. Can be used to find classes by name or to find classes for a specific purpose (by searching keywords in class names).",
-        inputSchema: {
-          type: "object",
-          properties: {
-            className: {
-              type: "string",
-              description: "Fully qualified class name, partial name, or keywords describing the class purpose (e.g. 'JsonToXml').",
-            },
-          },
-          required: ["className"],
-        },
-      },
-      {
-        name: "get_class_details",
-        description: "Get details about a specific class from an artifact, including method signatures and javadocs (if source is available).",
-        inputSchema: {
-          type: "object",
-          properties: {
-            className: {
-                type: "string",
-                description: "Fully qualified class name",
-            },
-            artifactId: {
-                type: "number",
-                description: "The internal ID of the artifact (returned by search_classes)",
-            },
-            type: {
-                type: "string",
-                enum: ["signatures", "docs", "source"],
-                description: "Type of detail to retrieve: 'signatures' (methods), 'docs' (javadocs + methods), 'source' (full source code).",
-            }
-          },
-          required: ["className", "artifactId", "type"],
-        },
-      },
-      {
-        name: "refresh_index",
-        description: "Trigger a re-scan of the Maven repository",
-        inputSchema: {
-          type: "object",
-          properties: {},
-        },
-      }
-    ],
-  };
-});
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name === "search_artifacts") {
-    const query = String(request.params.arguments?.query);
-    
+server.registerTool(
+  "search_artifacts",
+  {
+    description: "Search for artifacts in the local Maven repository",
+    inputSchema: z.object({
+      query: z.string().describe("Search query (groupId, artifactId, or keyword)"),
+    }),
+  },
+  async ({ query }) => {
     const matches = indexer.search(query);
     
     // Limit results to avoid overflow
@@ -117,9 +53,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ],
     };
   }
+);
 
-  if (request.params.name === "search_classes") {
-    const className = String(request.params.arguments?.className);
+server.registerTool(
+  "search_classes",
+  {
+    description: "Search for Java classes. Can be used to find classes by name or to find classes for a specific purpose (by searching keywords in class names).",
+    inputSchema: z.object({
+      className: z.string().describe("Fully qualified class name, partial name, or keywords describing the class purpose (e.g. 'JsonToXml')."),
+    }),
+  },
+  async ({ className }) => {
     const matches = indexer.searchClass(className);
 
     const text = matches.length > 0
@@ -135,37 +79,67 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{ type: "text", text }]
     };
   }
+);
 
-  if (request.params.name === "get_class_details") {
-      const className = String(request.params.arguments?.className);
-      const artifactId = Number(request.params.arguments?.artifactId);
-      const type = String(request.params.arguments?.type) as 'signatures' | 'docs' | 'source';
-
+server.registerTool(
+  "get_class_details",
+  {
+    description: "Get details about a specific class from an artifact, including method signatures and javadocs (if source is available).",
+    inputSchema: z.object({
+      className: z.string().describe("Fully qualified class name"),
+      artifactId: z.number().describe("The internal ID of the artifact (returned by search_classes)"),
+      type: z.enum(["signatures", "docs", "source"]).describe("Type of detail to retrieve: 'signatures' (methods), 'docs' (javadocs + methods), 'source' (full source code)."),
+    }),
+  },
+  async ({ className, artifactId, type }) => {
       const artifact = indexer.getArtifactById(artifactId);
       if (!artifact) {
           return { content: [{ type: "text", text: "Artifact not found." }] };
       }
 
-      let jarPath: string;
-      
-      if (type === 'signatures') {
-          // Use Main JAR for signatures (javap)
-          jarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
-      } else {
-          // Use Source JAR for docs and full source
-          if (!artifact.hasSource) {
-              return { content: [{ type: "text", text: `Artifact ${artifact.groupId}:${artifact.artifactId}:${artifact.version} does not have a sources jar available locally.` }] };
+      let detail: Awaited<ReturnType<typeof SourceParser.getClassDetail>> = null;
+      let usedDecompilation = false;
+
+      // 1. If requesting source/docs, try Source JAR first
+      if (type === 'source' || type === 'docs') {
+          if (artifact.hasSource) {
+              const sourceJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}-sources.jar`);
+              try {
+                  detail = await SourceParser.getClassDetail(sourceJarPath, className, type);
+              } catch (e) {
+                  // Ignore error and fallthrough to main jar (decompilation)
+              }
           }
-          jarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}-sources.jar`);
+          
+          // If not found in source jar (or no source jar), try main jar (decompilation)
+          if (!detail) {
+             const mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+             try {
+                 // SourceParser will try to decompile if source file not found in jar
+                 detail = await SourceParser.getClassDetail(mainJarPath, className, type);
+                 if (detail && detail.source) {
+                     usedDecompilation = true;
+                 }
+             } catch (e) {
+                 // Ignore
+             }
+          }
+      } else {
+          // Signatures -> Use Main JAR
+          const mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+          detail = await SourceParser.getClassDetail(mainJarPath, className, type);
       }
       
       try {
-          const detail = await SourceParser.getClassDetail(jarPath, className, type);
           if (!detail) {
-              return { content: [{ type: "text", text: `Class ${className} not found in ${type === 'signatures' ? 'artifact' : 'sources'} of ${artifact.artifactId}.` }] };
+              return { content: [{ type: "text", text: `Class ${className} not found in artifact ${artifact.artifactId}.` }] };
           }
 
           let resultText = `Class: ${detail.className}\n\n`;
+          if (usedDecompilation) {
+              resultText += "*Source code decompiled from binary class file.*\n\n";
+          }
+          
           if (type === 'source') {
               resultText += "```java\n" + detail.source + "\n```";
           } else {
@@ -182,17 +156,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: `Error reading source: ${e.message}` }] };
       }
   }
-  
-  if (request.params.name === "refresh_index") {
+);
+
+server.registerTool(
+  "refresh_index",
+  {
+    description: "Trigger a re-scan of the Maven repository",
+  },
+  async () => {
       // Re-run index
       indexer.index().catch(console.error);
       return {
           content: [{ type: "text", text: "Index refresh started." }]
       };
   }
-
-  throw new Error("Tool not found");
-});
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

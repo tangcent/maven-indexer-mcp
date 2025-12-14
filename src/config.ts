@@ -8,6 +8,7 @@ export class Config {
   public localRepository: string = "";
   public javaBinary: string = "java";
   public includedPackages: string[] = ["*"];
+  public cfrPath: string | null = null;
 
   private constructor() {}
 
@@ -75,10 +76,25 @@ export class Config {
         .filter(p => p.length > 0);
     }
 
+    // Load CFR Path
+    if (process.env.MAVEN_INDEXER_CFR_PATH) {
+        this.cfrPath = process.env.MAVEN_INDEXER_CFR_PATH;
+    } else {
+        // Fallback to default bundled lib
+        this.cfrPath = path.resolve(process.cwd(), 'lib/cfr-0.152.jar');
+    }
+
     // Log to stderr so it doesn't interfere with MCP protocol on stdout
     console.error(`Using local repository: ${this.localRepository}`);
     console.error(`Using Java binary: ${this.javaBinary}`);
     console.error(`Included packages: ${JSON.stringify(this.includedPackages)}`);
+    if (this.cfrPath) {
+        console.error(`Using CFR jar: ${this.cfrPath}`);
+    }
+  }
+
+  public getCfrJarPath(): string | null {
+      return this.cfrPath;
   }
 
   public getJavapPath(): string {

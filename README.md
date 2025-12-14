@@ -33,6 +33,7 @@ If the auto-detection fails, or if you want to filter which packages are indexed
 
 *   **`MAVEN_REPO`**: Absolute path to your local Maven repository (e.g., `/Users/yourname/.m2/repository`). Use this if your repository is in a non-standard location.
 *   **`INCLUDED_PACKAGES`**: Comma-separated list of package patterns to index (e.g., `com.mycompany.*,org.example.*`). Default is `*` (index everything).
+*   **`MAVEN_INDEXER_CFR_PATH`**: (Optional) Absolute path to a specific CFR decompiler JAR. If not provided, the server will attempt to use its bundled CFR version.
 
 Example with optional configuration:
 
@@ -44,7 +45,8 @@ Example with optional configuration:
       "args": ["-y", "maven-indexer-mcp@latest"],
       "env": {
         "MAVEN_REPO": "/Users/yourname/.m2/repository",
-        "INCLUDED_PACKAGES": "com.mycompany.*"
+        "INCLUDED_PACKAGES": "com.mycompany.*",
+        "MAVEN_INDEXER_CFR_PATH": "/path/to/cfr-0.152.jar"
       }
     }
   }

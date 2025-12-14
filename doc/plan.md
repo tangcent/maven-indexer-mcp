@@ -42,7 +42,7 @@ The server will support the following configuration properties to customize beha
 - **`indexSources`**: Boolean flag to indicate if source code inside source jars should be indexed (default: true).
 - **`maxDepth`**: Depth of dependency traversal if we implement transitive dependency resolution (optional for MVP).
 
-## 3. Index Structure Design (Updated)
+## 3.  **Index Structure Design (Updated)**
 
 We have transitioned from an in-memory index to a persistent SQLite-based index to handle large repositories and support advanced search capabilities (FTS).
 
@@ -55,6 +55,7 @@ We have transitioned from an in-memory index to a persistent SQLite-based index 
     *   `version`: TEXT
     *   `abspath`: TEXT (Path to artifact directory)
     *   `has_source`: INTEGER (Boolean flag, 1 if sources JAR exists)
+    *   `is_indexed`: INTEGER (Boolean flag, 1 if classes have been indexed)
     *   Unique constraint on (group_id, artifact_id, version).
 
 2.  **`classes_fts` Virtual Table (FTS5)**
@@ -63,22 +64,18 @@ We have transitioned from an in-memory index to a persistent SQLite-based index 
     *   `simple_name`: TEXT (Simple Name, e.g., `MyClass`)
     *   Tokenized with `trigram` tokenizer for efficient partial matching.
 
-3.  **`indexed_artifacts` Table**
-    *   `artifact_id`: INTEGER PRIMARY KEY
-    *   Used to track which artifacts have already been processed to avoid re-indexing.
-
 ### b. Indexing Strategy
 *   **Scanning**:
     *   Walk the directory structure of the local Maven repository.
     *   Identify `.pom` files to determine artifact coordinates.
     *   Check for existence of `-sources.jar`.
-    *   Insert metadata into `artifacts` table.
+    *   Insert metadata into `artifacts` table with `is_indexed = 0`.
 *   **Processing**:
-    *   Identify artifacts that are not yet in `indexed_artifacts`.
+    *   Identify artifacts where `is_indexed = 0`.
     *   Open the main JAR using `yauzl`.
     *   Extract class names from `.class` entries.
     *   Batch insert class names into `classes_fts`.
-    *   Mark artifact as indexed.
+    *   Update `artifacts` table setting `is_indexed = 1`.
 *   **On-Demand Details**:
     *   Full source code, method signatures, and Javadocs are **not** stored in the DB.
     *   They are extracted on-demand from the `-sources.jar` when requested via `get_class_details` tool.
