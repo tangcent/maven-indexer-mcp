@@ -1,0 +1,9 @@
+node_modules/
+build/
+maven-index.sqlite
+*.log
+.DS_Store
+test-repo/
+.env
+coverage/
+.idea/
