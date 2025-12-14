@@ -301,7 +301,11 @@ export class Indexer {
       // If pattern has no spaces, we assume it's a prefix or exact match query
       // "String" -> match "String" in simple_name or class_name
       
-      const query = `"${classNamePattern}"* OR ${classNamePattern}`;
+      const escapedPattern = classNamePattern.replace(/"/g, '""');
+      const safeQuery = classNamePattern.replace(/[^a-zA-Z0-9]/g, ' ').trim();
+      const query = safeQuery.length > 0 
+          ? `"${escapedPattern}"* OR ${safeQuery}`
+          : `"${escapedPattern}"*`;
 
       try {
           const rows = db.prepare(`

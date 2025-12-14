@@ -114,6 +114,13 @@ describe('Maven Indexer Integration', () => {
         expect(results[0].className).toContain('TestUtils');
     });
 
+    it('should find the class by fully qualified name', async () => {
+        const indexer = Indexer.getInstance();
+        const results = indexer.searchClass('com.test.demo.TestUtils');
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].className).toBe('com.test.demo.TestUtils');
+    });
+
     it('should find the class by purpose (semantic-ish)', async () => {
         const indexer = Indexer.getInstance();
         // Since we index class names, searching "Test" or "Utils" should work
