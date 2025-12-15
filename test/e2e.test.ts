@@ -132,6 +132,7 @@ describe('MCP Server E2E', () => {
             env: { 
                 ...process.env, 
                 MAVEN_REPO_PATH: TEST_REPO_DIR,
+                GRADLE_REPO_PATH: "/non-existent/path/to/disable/gradle",
                 DB_FILE: DB_FILE
             }
         });
@@ -147,18 +148,18 @@ describe('MCP Server E2E', () => {
 
         expect(searchResult.content[0].text).toContain("com.example.demo.E2EUtils");
         
-        // Extract Artifact ID (this is a bit hacky as we parse text output)
-        // The output format is: Class: com.example.demo.E2EUtils\n    [ID: 1] com.example:e2e-demo:1.0.0 (Has Source)
-        const match = searchResult.content[0].text.match(/\[ID: (\d+)\]/);
+        // Extract Coordinate
+        // Output: Class: com.example.demo.E2EUtils\n    com.example:e2e-demo:1.0.0 (Has Source)
+        const match = searchResult.content[0].text.match(/([a-zA-Z0-9.-]+:[a-zA-Z0-9.-]+:[a-zA-Z0-9.-]+)/);
         expect(match).not.toBeNull();
-        const artifactId = parseInt(match[1]);
+        const coordinate = match[1];
 
         // Test 2: Get Class Details
         const detailsResult = await sendRequest("tools/call", {
             name: "get_class_details",
             arguments: { 
                 className: "com.example.demo.E2EUtils",
-                artifactId: artifactId,
+                coordinate: coordinate,
                 type: "source"
             }
         });

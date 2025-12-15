@@ -1,6 +1,6 @@
 # Maven Indexer MCP Server
 
-A Model Context Protocol (MCP) server that indexes your local Maven repository (`~/.m2/repository`) and provides AI agents with tools to search for Java classes, method signatures, and source code.
+A Model Context Protocol (MCP) server that indexes your local Maven repository (`~/.m2/repository`) and Gradle cache (`~/.gradle/caches/modules-2/files-2.1`) to provide AI agents with tools to search for Java classes, method signatures, and source code.
 
 ## Features
 
@@ -8,7 +8,7 @@ A Model Context Protocol (MCP) server that indexes your local Maven repository (
 *   **Inheritance Search**: Find all implementations of an interface or subclasses of a class.
 *   **On-Demand Analysis**: Extracts method signatures (`javap`) and Javadocs directly from JARs without extracting the entire archive.
 *   **Source Code Retrieval**: Provides full source code if `-sources.jar` is available.
-*   **Real-time Monitoring**: Watches the Maven repository for changes (e.g., new `mvn install`) and automatically updates the index.
+*   **Real-time Monitoring**: Watches the repositories for changes (e.g., new `mvn install`) and automatically updates the index.
 *   **Efficient Persistence**: Uses SQLite to store the index, handling large repositories with minimal memory footprint.
 
 ## Getting Started
@@ -26,13 +26,14 @@ Add the following config to your MCP client:
 }
 ```
 
-This will automatically download and run the latest version of the server. It will auto-detect your Maven repository location (usually `~/.m2/repository`).
+This will automatically download and run the latest version of the server. It will auto-detect your Maven repository location (usually `~/.m2/repository`) and Gradle cache.
 
 ### Configuration (Optional)
 
 If the auto-detection fails, or if you want to filter which packages are indexed, you can add environment variables to the configuration:
 
 *   **`MAVEN_REPO`**: Absolute path to your local Maven repository (e.g., `/Users/yourname/.m2/repository`). Use this if your repository is in a non-standard location.
+*   **`GRADLE_REPO_PATH`**: Absolute path to your Gradle cache (e.g., `/Users/yourname/.gradle/caches/modules-2/files-2.1`).
 *   **`INCLUDED_PACKAGES`**: Comma-separated list of package patterns to index (e.g., `com.mycompany.*,org.example.*`). Default is `*` (index everything).
 *   **`MAVEN_INDEXER_CFR_PATH`**: (Optional) Absolute path to a specific CFR decompiler JAR. If not provided, the server will attempt to use its bundled CFR version.
 
@@ -46,6 +47,7 @@ Example with optional configuration:
       "args": ["-y", "maven-indexer-mcp@latest"],
       "env": {
         "MAVEN_REPO": "/Users/yourname/.m2/repository",
+        "GRADLE_REPO_PATH": "/Users/yourname/.gradle/caches/modules-2/files-2.1",
         "INCLUDED_PACKAGES": "com.mycompany.*",
         "MAVEN_INDEXER_CFR_PATH": "/path/to/cfr-0.152.jar"
       }

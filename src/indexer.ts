@@ -42,10 +42,17 @@ export class Indexer {
    */
   public async startWatch() {
     const config = await Config.getInstance();
-    const repoPath = config.localRepository;
+    const pathsToWatch: string[] = [];
+
+    if (config.localRepository && fsSync.existsSync(config.localRepository)) {
+        pathsToWatch.push(config.localRepository);
+    }
+    if (config.gradleRepository && fsSync.existsSync(config.gradleRepository)) {
+        pathsToWatch.push(config.gradleRepository);
+    }
     
-    if (!repoPath || !fsSync.existsSync(repoPath)) {
-        console.error("Repository path not found, skipping watch mode.");
+    if (pathsToWatch.length === 0) {
+        console.error("No repository paths found, skipping watch mode.");
         return;
     }
 
@@ -53,8 +60,8 @@ export class Indexer {
         return;
     }
 
-    console.error(`Starting file watcher on ${repoPath}...`);
-    this.watcher = chokidar.watch(repoPath, {
+    console.error(`Starting file watcher on ${pathsToWatch.join(', ')}...`);
+    this.watcher = chokidar.watch(pathsToWatch, {
         ignored: /(^|[\/\\])\../, // ignore dotfiles
         persistent: true,
         ignoreInitial: true,
@@ -106,16 +113,33 @@ export class Indexer {
     try {
         const config = await Config.getInstance();
         const repoPath = config.localRepository;
+        const gradleRepoPath = config.gradleRepository;
         const db = DB.getInstance();
 
-        if (!repoPath) {
-            console.error("No local repository path found.");
+        if (!repoPath && !gradleRepoPath) {
+            console.error("No repository path found.");
             return;
         }
+
         // 1. Scan for artifacts
         console.error("Scanning repository structure...");
-        const artifacts = await this.scanRepository(repoPath);
-        console.error(`Found ${artifacts.length} artifacts on disk.`);
+        let artifacts: Artifact[] = [];
+        
+        if (repoPath && fsSync.existsSync(repoPath)) {
+            console.error(`Scanning Maven repo: ${repoPath}`);
+            const mavenArtifacts = await this.scanRepository(repoPath);
+            console.error(`Found ${mavenArtifacts.length} Maven artifacts.`);
+            artifacts = artifacts.concat(mavenArtifacts);
+        }
+
+        if (gradleRepoPath && fsSync.existsSync(gradleRepoPath)) {
+             console.error(`Scanning Gradle repo: ${gradleRepoPath}`);
+             const gradleArtifacts = await this.scanGradleRepository(gradleRepoPath);
+             console.error(`Found ${gradleArtifacts.length} Gradle artifacts.`);
+             artifacts = artifacts.concat(gradleArtifacts);
+        }
+        
+        console.error(`Found ${artifacts.length} total artifacts on disk.`);
 
         // 2. Persist artifacts and determine what needs indexing
         // We use is_indexed = 0 for new artifacts.
@@ -232,11 +256,88 @@ export class Indexer {
   }
 
   /**
+   * Scans a Gradle cache directory for artifacts.
+   * Structure: group/artifact/version/hash/file
+   */
+  private async scanGradleRepository(rootDir: string): Promise<Artifact[]> {
+    const results: Artifact[] = [];
+    
+    // Helper to read directory safely
+    const readDirSafe = async (p: string) => {
+        try {
+            return await fs.readdir(p, { withFileTypes: true });
+        } catch (e) {
+            return [];
+        }
+    };
+
+    const groupDirs = await readDirSafe(rootDir);
+    for (const groupEntry of groupDirs) {
+        if (!groupEntry.isDirectory()) continue;
+        const groupId = groupEntry.name;
+        const groupPath = path.join(rootDir, groupId);
+        
+        const artifactDirs = await readDirSafe(groupPath);
+        for (const artifactEntry of artifactDirs) {
+            if (!artifactEntry.isDirectory()) continue;
+            const artifactId = artifactEntry.name;
+            const artifactPath = path.join(groupPath, artifactId);
+            
+            const versionDirs = await readDirSafe(artifactPath);
+            for (const versionEntry of versionDirs) {
+                if (!versionEntry.isDirectory()) continue;
+                const version = versionEntry.name;
+                const versionPath = path.join(artifactPath, version);
+                
+                const hashDirs = await readDirSafe(versionPath);
+                let jarPath: string | null = null;
+                let hasSource = false;
+
+                // We need to iterate all hash dirs to find the jar and source jar
+                for (const hashEntry of hashDirs) {
+                     if (!hashEntry.isDirectory()) continue;
+                     const hashPath = path.join(versionPath, hashEntry.name);
+                     const files = await readDirSafe(hashPath);
+                     
+                     for (const file of files) {
+                         if (file.isFile()) {
+                             if (file.name.endsWith('.jar')) {
+                                 if (file.name.endsWith('-sources.jar')) {
+                                     hasSource = true;
+                                 } else if (!file.name.endsWith('-javadoc.jar')) {
+                                     // This should be the main jar
+                                     jarPath = path.join(hashPath, file.name);
+                                 }
+                             }
+                         }
+                     }
+                }
+
+                if (jarPath) {
+                    results.push({
+                        id: 0, // Placeholder
+                        groupId,
+                        artifactId,
+                        version,
+                        abspath: jarPath, // Full path to JAR
+                        hasSource
+                    });
+                }
+            }
+        }
+    }
+    return results;
+  }
+
+  /**
    * Extracts classes from the artifact's JAR and indexes them.
    * Updates the 'is_indexed' flag upon completion.
    */
   private async indexArtifactClasses(artifact: Artifact): Promise<void> {
-      const jarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+      let jarPath = artifact.abspath;
+      if (!jarPath.endsWith('.jar')) {
+        jarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+      }
       const db = DB.getInstance();
       const config = await Config.getInstance();
       

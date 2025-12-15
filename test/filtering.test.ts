@@ -67,6 +67,7 @@ describe('Maven Indexer Filtering', () => {
         // Setup Config
         const config = await Config.getInstance();
         config.localRepository = TEST_REPO_DIR;
+        config.gradleRepository = "";
     });
 
     afterAll(() => {

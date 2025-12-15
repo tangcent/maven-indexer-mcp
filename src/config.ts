@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 export class Config {
   private static instance: Config;
   public localRepository: string = "";
+  public gradleRepository: string = "";
   public javaBinary: string = "java";
   public includedPackages: string[] = ["*"];
   public cfrPath: string | null = null;
@@ -62,6 +63,17 @@ export class Config {
     }
 
     this.localRepository = repoPath;
+
+    // Load Gradle Repository
+    let gradleRepoPath: string | null = null;
+    if (process.env.GRADLE_REPO_PATH) {
+      gradleRepoPath = process.env.GRADLE_REPO_PATH;
+    } else if (process.env.GRADLE_USER_HOME) {
+      gradleRepoPath = path.join(process.env.GRADLE_USER_HOME, 'caches', 'modules-2', 'files-2.1');
+    } else {
+      gradleRepoPath = path.join(os.homedir(), '.gradle', 'caches', 'modules-2', 'files-2.1');
+    }
+    this.gradleRepository = gradleRepoPath;
 
     // Load Java Path
     if (process.env.JAVA_HOME) {

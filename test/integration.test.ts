@@ -87,6 +87,7 @@ describe('Maven Indexer Integration', () => {
         // Setup Config
         const config = await Config.getInstance();
         config.localRepository = TEST_REPO_DIR;
+        config.gradleRepository = "";
         // config.javaBinary should be detected or default
     });
 

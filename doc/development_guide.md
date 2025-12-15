@@ -42,7 +42,8 @@ Configure your MCP client to point directly to the built file. This allows you t
       "command": "node",
       "args": ["/ABSOLUTE/PATH/TO/maven-indexer/build/index.js"],
       "env": {
-        "MAVEN_REPO": "/path/to/test/repo" // Optional: Override for testing
+        "MAVEN_REPO": "/path/to/test/repo", // Optional: Override for testing
+        "GRADLE_REPO_PATH": "/path/to/test/gradle-repo" // Optional: Override for testing
       }
     }
   }
