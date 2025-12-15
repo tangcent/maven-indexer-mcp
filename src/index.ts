@@ -41,7 +41,7 @@ server.registerTool(
     const limitedMatches = matches.slice(0, 20);
     
     const text = limitedMatches.length > 0
-        ? limitedMatches.map(a => `[ID: ${a.id}] ${a.groupId}:${a.artifactId}:${a.version} (Has Source: ${a.hasSource})`).join("\n")
+        ? limitedMatches.map(a => `${a.groupId}:${a.artifactId}:${a.version} (Has Source: ${a.hasSource})`).join("\n")
         : "No artifacts found matching the query.";
 
     return {
@@ -69,7 +69,7 @@ server.registerTool(
     const text = matches.length > 0
         ? matches.map(m => {
             // Group by artifact ID to allow easy selection
-            const artifacts = m.artifacts.slice(0, 5).map(a => `[ID: ${a.id}] ${a.groupId}:${a.artifactId}:${a.version}${a.hasSource ? ' (Has Source)' : ''}`).join("\n    ");
+            const artifacts = m.artifacts.slice(0, 5).map(a => `${a.groupId}:${a.artifactId}:${a.version}${a.hasSource ? ' (Has Source)' : ''}`).join("\n    ");
             const more = m.artifacts.length > 5 ? `\n    ... (${m.artifacts.length - 5} more versions)` : '';
             return `Class: ${m.className}\n    ${artifacts}${more}`;
         }).join("\n\n")
@@ -94,7 +94,7 @@ server.registerTool(
 
     const text = matches.length > 0
         ? matches.map(m => {
-            const artifacts = m.artifacts.slice(0, 5).map(a => `[ID: ${a.id}] ${a.groupId}:${a.artifactId}:${a.version}`).join("\n    ");
+            const artifacts = m.artifacts.slice(0, 5).map(a => `${a.groupId}:${a.artifactId}:${a.version}`).join("\n    ");
             const more = m.artifacts.length > 5 ? `\n    ... (${m.artifacts.length - 5} more versions)` : '';
             return `Implementation: ${m.className}\n    ${artifacts}${more}`;
         }).join("\n\n")
@@ -112,15 +112,25 @@ server.registerTool(
     description: "Decompile and read the source code of external libraries/dependencies. Use this instead of 'SearchCodebase' for classes that are imported but defined in JAR files. Returns method signatures, Javadocs, or full source. Essential for verifying implementation details during refactoring. Don't guess what the library does—read the code. When reviewing usages of an external class, use this to retrieve the class definition to understand the context fully.",
     inputSchema: z.object({
       className: z.string().describe("Fully qualified class name"),
-      artifactId: z.number().optional().describe("The internal ID of the artifact. Optional: if not provided, the tool will automatically find the best match (preferring artifacts with source code)."),
+      coordinate: z.string().optional().describe("The Maven coordinate of the artifact (groupId:artifactId:version). Optional: if not provided, the tool will automatically find the best match (preferring artifacts with source code)."),
       type: z.enum(["signatures", "docs", "source"]).describe("Type of detail to retrieve: 'signatures' (methods), 'docs' (javadocs + methods), 'source' (full source code)."),
     }),
   },
-  async ({ className, artifactId, type }) => {
-      let targetArtifactId = artifactId;
+  async ({ className, coordinate, type }) => {
+      let targetArtifact: import("./indexer.js").Artifact | undefined;
 
-      // Auto-resolve artifact if ID is missing
-      if (!targetArtifactId) {
+      if (coordinate) {
+          const parts = coordinate.split(':');
+          if (parts.length === 3) {
+             targetArtifact = indexer.getArtifactByCoordinate(parts[0], parts[1], parts[2]);
+          } else {
+             return { content: [{ type: "text", text: "Invalid coordinate format. Expected groupId:artifactId:version" }] };
+          }
+          if (!targetArtifact) {
+              return { content: [{ type: "text", text: `Artifact ${coordinate} not found in index.` }] };
+          }
+      } else {
+          // Auto-resolve artifact if coordinate is missing
           const matches = indexer.searchClass(className);
           // Find exact match for class name
           const exactMatch = matches.find(m => m.className === className);
@@ -147,14 +157,11 @@ server.registerTool(
               return { content: [{ type: "text", text: `Class '${className}' found but no artifacts are associated with it (database inconsistency).` }] };
           }
 
-          targetArtifactId = artifacts[0].id;
-          // console.error(`Auto-resolved ${className} to artifact ${artifacts[0].groupId}:${artifacts[0].artifactId}:${artifacts[0].version} (ID: ${targetArtifactId})`);
+          targetArtifact = artifacts[0];
+          // console.error(`Auto-resolved ${className} to artifact ${artifacts[0].groupId}:${artifacts[0].artifactId}:${artifacts[0].version} (ID: ${targetArtifact.id})`);
       }
 
-      const artifact = indexer.getArtifactById(targetArtifactId);
-      if (!artifact) {
-          return { content: [{ type: "text", text: "Artifact not found." }] };
-      }
+      const artifact = targetArtifact;
 
       let detail: Awaited<ReturnType<typeof SourceParser.getClassDetail>> = null;
       let usedDecompilation = false;

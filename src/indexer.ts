@@ -6,7 +6,7 @@ import chokidar from 'chokidar';
 import { FSWatcher } from 'chokidar';
 import { Config } from './config.js';
 import { DB } from './db/index.js';
-import { ClassParser, ClassInfo } from './class_parser.js';
+import { ClassParser } from './class_parser.js';
 
 export interface Artifact {
   id: number;
@@ -530,6 +530,30 @@ export class Indexer {
           SELECT id, group_id as groupId, artifact_id as artifactId, version, abspath, has_source as hasSource
           FROM artifacts WHERE id = ?
       `).get(id) as any;
+      
+      if (row) {
+          return {
+              id: row.id,
+              groupId: row.groupId,
+              artifactId: row.artifactId,
+              version: row.version,
+              abspath: row.abspath,
+              hasSource: Boolean(row.hasSource)
+          };
+      }
+      return undefined;
+  }
+
+  /**
+   * Retrieves an artifact by its Maven coordinate.
+   */
+  public getArtifactByCoordinate(groupId: string, artifactId: string, version: string): Artifact | undefined {
+      const db = DB.getInstance();
+      const row = db.prepare(`
+          SELECT id, group_id as groupId, artifact_id as artifactId, version, abspath, has_source as hasSource
+          FROM artifacts 
+          WHERE group_id = ? AND artifact_id = ? AND version = ?
+      `).get(groupId, artifactId, version) as any;
       
       if (row) {
           return {
