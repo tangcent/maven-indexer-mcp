@@ -5,6 +5,7 @@ A Model Context Protocol (MCP) server that indexes your local Maven repository (
 ## Features
 
 *   **Semantic Class Search**: Search for classes by name (e.g., `StringUtils`) or purpose (e.g., `JsonToXml`).
+*   **Inheritance Search**: Find all implementations of an interface or subclasses of a class.
 *   **On-Demand Analysis**: Extracts method signatures (`javap`) and Javadocs directly from JARs without extracting the entire archive.
 *   **Source Code Retrieval**: Provides full source code if `-sources.jar` is available.
 *   **Real-time Monitoring**: Watches the Maven repository for changes (e.g., new `mvn install`) and automatically updates the index.
@@ -90,6 +91,10 @@ If you prefer to run from source:
     *   Input: `className`, `artifactId`, `type` ("signatures", "docs", "source")
     *   Output: Method signatures, Javadocs, or full source code.
 *   **`search_artifacts`**: Search for artifacts by coordinate (groupId, artifactId).
+*   **`search_implementations`**: Search for classes that implement a specific interface or extend a specific class.
+    *   Input: `className` (e.g. "java.util.List")
+    *   Output: List of implementation/subclass names and their artifacts.
+*   **`refresh_index`**: Trigger a re-scan of the Maven repository.
 
 ## Development
 

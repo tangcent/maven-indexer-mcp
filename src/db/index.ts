@@ -21,6 +21,16 @@ export class DB {
   }
 
   private initSchema() {
+    // Register REGEXP function
+    this.db.function('regexp', { deterministic: true }, (regex, text) => {
+        if (!regex || !text) return 0;
+        try {
+            return new RegExp(regex as string).test(text as string) ? 1 : 0;
+        } catch (e) {
+            return 0;
+        }
+    });
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS artifacts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,6 +49,16 @@ export class DB {
         simple_name, -- Just the class name
         tokenize="trigram" 
       );
+
+      CREATE TABLE IF NOT EXISTS inheritance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        artifact_id INTEGER NOT NULL,
+        class_name TEXT NOT NULL,
+        parent_class_name TEXT NOT NULL,
+        type TEXT NOT NULL
+      );
+      
+      CREATE INDEX IF NOT EXISTS idx_inheritance_parent ON inheritance(parent_class_name);
       
       -- Cleanup old table if exists
       DROP TABLE IF EXISTS indexed_artifacts;

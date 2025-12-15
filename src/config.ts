@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import xml2js from 'xml2js';
+import { fileURLToPath } from 'url';
 
 export class Config {
   private static instance: Config;
@@ -81,7 +82,9 @@ export class Config {
         this.cfrPath = process.env.MAVEN_INDEXER_CFR_PATH;
     } else {
         // Fallback to default bundled lib
-        this.cfrPath = path.resolve(process.cwd(), 'lib/cfr-0.152.jar');
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = path.dirname(__filename);
+        this.cfrPath = path.resolve(__dirname, '../lib/cfr-0.152.jar');
     }
 
     // Log to stderr so it doesn't interfere with MCP protocol on stdout

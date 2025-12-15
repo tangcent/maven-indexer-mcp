@@ -6,6 +6,7 @@ import chokidar from 'chokidar';
 import { FSWatcher } from 'chokidar';
 import { Config } from './config.js';
 import { DB } from './db/index.js';
+import { ClassParser, ClassInfo } from './class_parser.js';
 
 export interface Artifact {
   id: number;
@@ -78,6 +79,20 @@ export class Indexer {
   }
 
   /**
+   * Forces a full re-index of the repository.
+   */
+  public async refresh() {
+      const db = DB.getInstance();
+      console.error("Refreshing index...");
+      db.transaction(() => {
+          db.prepare('UPDATE artifacts SET is_indexed = 0').run();
+          db.prepare('DELETE FROM classes_fts').run();
+          db.prepare('DELETE FROM inheritance').run();
+      });
+      return this.index();
+  }
+
+  /**
    * Main indexing process.
    * 1. Scans the file system for Maven artifacts.
    * 2. Synchronizes the database with found artifacts.
@@ -87,17 +102,16 @@ export class Indexer {
     if (this.isIndexing) return;
     this.isIndexing = true;
     console.error("Starting index...");
-    const config = await Config.getInstance();
-    const repoPath = config.localRepository;
-    const db = DB.getInstance();
-
-    if (!repoPath) {
-        console.error("No local repository path found.");
-        this.isIndexing = false;
-        return;
-    }
 
     try {
+        const config = await Config.getInstance();
+        const repoPath = config.localRepository;
+        const db = DB.getInstance();
+
+        if (!repoPath) {
+            console.error("No local repository path found.");
+            return;
+        }
         // 1. Scan for artifacts
         console.error("Scanning repository structure...");
         const artifacts = await this.scanRepository(repoPath);
@@ -119,6 +133,19 @@ export class Indexer {
                 });
             }
         });
+
+        // Check if we need to backfill inheritance data (migration)
+        const inheritanceCount = db.prepare('SELECT COUNT(*) as count FROM inheritance').get() as { count: number };
+        const indexedArtifactsCount = db.prepare('SELECT COUNT(*) as count FROM artifacts WHERE is_indexed = 1').get() as { count: number };
+        
+        if (inheritanceCount.count === 0 && indexedArtifactsCount.count > 0) {
+            console.error("Detected missing inheritance data. Forcing re-index of classes...");
+            db.transaction(() => {
+                db.prepare('UPDATE artifacts SET is_indexed = 0').run();
+                db.prepare('DELETE FROM classes_fts').run();
+                // inheritance is already empty
+            });
+        }
 
         // 3. Find artifacts that need indexing (is_indexed = 0)
         const artifactsToIndex = db.prepare(`
@@ -231,22 +258,47 @@ export class Indexer {
               }
 
               const classes: string[] = [];
+              const inheritance: { className: string, parent: string, type: 'extends' | 'implements' }[] = [];
 
               zipfile.readEntry();
 
               zipfile.on('entry', (entry) => {
                   if (entry.fileName.endsWith('.class')) {
-                      // Convert path/to/MyClass.class -> path.to.MyClass
-                      const className = entry.fileName.slice(0, -6).replace(/\//g, '.');
-                      // Simple check to avoid module-info or invalid names
-                      if (!className.includes('$') && className.length > 0) {
-                          // Filter by includedPackages
-                          if (this.isPackageIncluded(className, config.includedPackages)) {
-                              classes.push(className);
+                      zipfile.openReadStream(entry, (err, readStream) => {
+                          if (err || !readStream) {
+                              zipfile.readEntry();
+                              return;
                           }
-                      }
+
+                          const chunks: Buffer[] = [];
+                          readStream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+                          readStream.on('end', () => {
+                              const buffer = Buffer.concat(chunks);
+                              try {
+                                  const info = ClassParser.parse(buffer);
+                                  // Simple check to avoid module-info or invalid names
+                                  if (!info.className.includes('$') && info.className.length > 0) {
+                                      // Filter by includedPackages
+                                      if (this.isPackageIncluded(info.className, config.includedPackages)) {
+                                          classes.push(info.className);
+
+                                          if (info.superClass && info.superClass !== 'java.lang.Object') {
+                                              inheritance.push({ className: info.className, parent: info.superClass, type: 'extends' });
+                                          }
+                                          for (const iface of info.interfaces) {
+                                              inheritance.push({ className: info.className, parent: iface, type: 'implements' });
+                                          }
+                                      }
+                                  }
+                              } catch (e) {
+                                  // console.error(`Failed to parse ${entry.fileName}`, e);
+                              }
+                              zipfile.readEntry();
+                          });
+                      });
+                  } else {
+                      zipfile.readEntry();
                   }
-                  zipfile.readEntry();
               });
 
               zipfile.on('end', () => {
@@ -257,10 +309,20 @@ export class Indexer {
                               INSERT INTO classes_fts (artifact_id, class_name, simple_name)
                               VALUES (?, ?, ?)
                           `);
+                          const insertInheritance = db.prepare(`
+                              INSERT INTO inheritance (artifact_id, class_name, parent_class_name, type)
+                              VALUES (?, ?, ?, ?)
+                          `);
+
                           for (const cls of classes) {
                               const simpleName = cls.split('.').pop() || cls;
                               insertClass.run(artifact.id, cls, simpleName);
                           }
+
+                          for (const item of inheritance) {
+                              insertInheritance.run(artifact.id, item.className, item.parent, item.type);
+                          }
+
                           // Mark as indexed
                           db.prepare('UPDATE artifacts SET is_indexed = 1 WHERE id = ?').run(artifact.id);
                       });
@@ -318,25 +380,54 @@ export class Indexer {
   public searchClass(classNamePattern: string): { className: string, artifacts: Artifact[] }[] {
       const db = DB.getInstance();
       
-      // Use FTS for smart matching
-      // If pattern has no spaces, we assume it's a prefix or exact match query
-      // "String" -> match "String" in simple_name or class_name
-      
-      const escapedPattern = classNamePattern.replace(/"/g, '""');
-      const safeQuery = classNamePattern.replace(/[^a-zA-Z0-9]/g, ' ').trim();
-      const query = safeQuery.length > 0 
-          ? `"${escapedPattern}"* OR ${safeQuery}`
-          : `"${escapedPattern}"*`;
-
       try {
-          const rows = db.prepare(`
-              SELECT c.class_name, c.simple_name, a.id, a.group_id, a.artifact_id, a.version, a.abspath, a.has_source
-              FROM classes_fts c
-              JOIN artifacts a ON c.artifact_id = a.id
-              WHERE c.classes_fts MATCH ?
-              ORDER BY rank
-              LIMIT 100
-          `).all(query) as any[];
+          let rows: any[] = [];
+
+          if (classNamePattern.startsWith('regex:')) {
+              // Regex search
+              const regex = classNamePattern.substring(6);
+              rows = db.prepare(`
+                  SELECT c.class_name, c.simple_name, a.id, a.group_id, a.artifact_id, a.version, a.abspath, a.has_source
+                  FROM classes_fts c
+                  JOIN artifacts a ON c.artifact_id = a.id
+                  WHERE c.class_name REGEXP ? OR c.simple_name REGEXP ?
+                  LIMIT 100
+              `).all(regex, regex) as any[];
+
+          } else if (classNamePattern.includes('*') || classNamePattern.includes('?')) {
+              // Glob-style search (using LIKE for standard wildcards)
+              // Convert glob wildcards to SQL wildcards if needed, or just rely on user knowing %/_
+              // But standard glob is * and ?
+              const likePattern = classNamePattern.replace(/\*/g, '%').replace(/\?/g, '_');
+              
+              rows = db.prepare(`
+                  SELECT c.class_name, c.simple_name, a.id, a.group_id, a.artifact_id, a.version, a.abspath, a.has_source
+                  FROM classes_fts c
+                  JOIN artifacts a ON c.artifact_id = a.id
+                  WHERE c.class_name LIKE ? OR c.simple_name LIKE ?
+                  LIMIT 100
+              `).all(likePattern, likePattern) as any[];
+
+          } else {
+              // Use FTS for smart matching
+              // If pattern has no spaces, we assume it's a prefix or exact match query
+              // "String" -> match "String" in simple_name or class_name
+              
+              const escapedPattern = classNamePattern.replace(/"/g, '""');
+              const safeQuery = classNamePattern.replace(/[^a-zA-Z0-9]/g, ' ').trim();
+              const query = safeQuery.length > 0 
+                  ? `"${escapedPattern}"* OR ${safeQuery}`
+                  : `"${escapedPattern}"*`;
+
+              rows = db.prepare(`
+                  SELECT c.class_name, c.simple_name, a.id, a.group_id, a.artifact_id, a.version, a.abspath, a.has_source
+                  FROM classes_fts c
+                  JOIN artifacts a ON c.artifact_id = a.id
+                  WHERE c.classes_fts MATCH ?
+                  ORDER BY rank
+                  LIMIT 100
+              `).all(query) as any[];
+          }
 
           // Group by class name
           const resultMap = new Map<string, Artifact[]>();
@@ -363,6 +454,69 @@ export class Indexer {
 
       } catch (e) {
           console.error("Search failed", e);
+          return [];
+      }
+  }
+
+  /**
+   * Searches for implementations/subclasses of a specific class/interface.
+   */
+  public searchImplementations(className: string): { className: string, artifacts: Artifact[] }[] {
+      const db = DB.getInstance();
+      try {
+          console.error(`Searching implementations for ${className}...`);
+          
+          // Debug: Check if we have any inheritance data at all
+          const count = db.prepare("SELECT count(*) as c FROM inheritance").get() as {c: number};
+          if (count.c === 0) {
+             console.error("WARNING: Inheritance table is empty!");
+          }
+
+          // Recursive search for all implementations/subclasses
+          const rows = db.prepare(`
+              WITH RECURSIVE hierarchy(class_name, artifact_id) AS (
+                SELECT class_name, artifact_id FROM inheritance WHERE parent_class_name = ?
+                UNION
+                SELECT i.class_name, i.artifact_id FROM inheritance i JOIN hierarchy h ON i.parent_class_name = h.class_name
+              )
+              SELECT DISTINCT h.class_name, a.id, a.group_id, a.artifact_id, a.version, a.abspath, a.has_source
+              FROM hierarchy h
+              JOIN artifacts a ON h.artifact_id = a.id
+              LIMIT 100
+          `).all(className) as any[];
+
+          console.error(`Searching implementations for ${className}: found ${rows.length} rows.`);
+
+          if (rows.length === 0) {
+             // Fallback: Try searching without recursion to see if direct children exist
+             const direct = db.prepare('SELECT count(*) as c FROM inheritance WHERE parent_class_name = ?').get(className) as {c: number};
+             console.error(`Direct implementations check for ${className}: ${direct.c}`);
+          }
+
+          const resultMap = new Map<string, Artifact[]>();
+          for (const row of rows) {
+              const art: Artifact = {
+                  id: row.id,
+                  groupId: row.group_id,
+                  artifactId: row.artifact_id,
+                  version: row.version,
+                  abspath: row.abspath,
+                  hasSource: Boolean(row.has_source)
+              };
+              
+              if (!resultMap.has(row.class_name)) {
+                  resultMap.set(row.class_name, []);
+              }
+              resultMap.get(row.class_name)!.push(art);
+          }
+
+          return Array.from(resultMap.entries()).map(([className, artifacts]) => ({
+              className,
+              artifacts
+          }));
+
+      } catch (e) {
+          console.error("Search implementations failed", e);
           return [];
       }
   }

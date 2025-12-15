@@ -79,33 +79,45 @@ export class SourceParser {
     // If it is the sources jar, decompilation will fail (as it doesn't contain .class files),
     // returning null.
     if (type === 'source' || type === 'docs') {
-        return this.decompileClass(jarPath, className);
+        return this.decompileClass(jarPath, className, type);
     }
 
     return null;
   }
 
-  private static async decompileClass(jarPath: string, className: string): Promise<ClassDetail | null> {
+  private static async decompileClass(jarPath: string, className: string, type: 'source' | 'docs'): Promise<ClassDetail | null> {
+      const config = await Config.getInstance();
+      const cfrPath = config.getCfrJarPath();
+      
+      if (!cfrPath || !fs.existsSync(cfrPath)) {
+          throw new Error(`CFR jar not found at ${cfrPath}`);
+      }
+
+      // Use java -cp cfr.jar:target.jar org.benf.cfr.reader.Main className
+      const classpath = `${cfrPath}${path.delimiter}${jarPath}`;
+      const cmd = `java -cp "${classpath}" org.benf.cfr.reader.Main "${className}"`;
+      // console.error("Running decompile command:", cmd);
+      
       try {
-          const config = await Config.getInstance();
-          const cfrPath = config.getCfrJarPath();
+          const { stdout, stderr } = await execAsync(cmd);
           
-          if (!cfrPath || !fs.existsSync(cfrPath)) {
-              // If we can't find CFR, we can't decompile.
-              return null;
+          if (!stdout && stderr) {
+             console.error(`CFR stderr for ${className}:`, stderr);
+             // If stderr has content but stdout is empty, it might be an error
+             throw new Error(`CFR stderr: ${stderr}`);
+          }
+          
+          if (stdout) {
+              return this.parse(className, stdout, type);
           }
 
-          // Use java -cp cfr.jar:target.jar org.benf.cfr.reader.Main className
-          const classpath = `${cfrPath}${path.delimiter}${jarPath}`;
-          const { stdout } = await execAsync(`java -cp "${classpath}" org.benf.cfr.reader.Main "${className}"`);
-          
           return {
               className,
               source: stdout // Return as source
           };
-      } catch (e) {
-          // console.error(`CFR failed for ${className} in ${jarPath}:`, e);
-          return null; 
+      } catch (e: any) {
+          console.error(`CFR failed for ${className} in ${jarPath}:`, e.message);
+          throw e; // Rethrow to let caller handle
       }
   }
 
@@ -156,7 +168,8 @@ export class SourceParser {
 
       // Regex to match method signatures (public/protected, return type, name, args)
       // ignoring annotations for simplicity
-      const methodRegex = /^\s*(public|protected)\s+(?:[\w<>?\[\]]+\s+)+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,.\s]+)?\s*\{?/;
+      // Expanded to match decompiled code better (e.g., might not have throws, might be abstract)
+      const methodRegex = /^\s*(public|protected)\s+(?:[\w<>?\[\]]+\s+)+(\w+)\s*\([^)]*\)/;
 
       for (const line of lines) {
           const trimmed = line.trim();
