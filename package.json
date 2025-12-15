@@ -1,7 +1,10 @@
 {
-  "name": "maven-indexer-mcp",
-  "version": "1.0.4",
+  "name": "@tangcent/maven-indexer-mcp",
+  "version": "1.0.5",
   "description": "MCP server for indexing local Maven repository",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "main": "build/index.js",
   "type": "module",
   "bin": {
