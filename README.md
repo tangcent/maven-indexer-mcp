@@ -84,14 +84,22 @@ If you prefer to run from source:
 
 ## Available Tools
 
-*   **`search_classes`**: Search for Java classes.
+*   **`search_classes`**: Search for Java classes in the local Maven repository (dependencies).
+    *   **WHEN TO USE**:
+        1.  You cannot find a class definition in the current project source (it's likely a dependency).
+        2.  You need to read the source code, method signatures, or Javadocs of an external library class.
+        3.  You need to verify which version of a library class is being used.
+    *   **Examples**: "Show me the source of StringUtils", "What methods are available on DateTimeUtils?", "Where is this class imported from?".
     *   Input: `className` (e.g., "StringUtils", "Json parser")
     *   Output: List of matching classes with their artifacts.
-*   **`get_class_details`**: Get detailed information about a class.
-    *   Input: `className`, `artifactId`, `type` ("signatures", "docs", "source")
+*   **`get_class_details`**: Decompile and read the source code of external libraries/dependencies. **Use this instead of 'SearchCodebase' for classes that are imported but defined in JAR files.**
+    *   **Key Value**: "Don't guess what the library does—read the code."
+    *   **Tip**: When reviewing usages of an external class, use this to retrieve the class definition to understand the context fully.
+    *   Input: `className` (required), `artifactId` (optional), `type` ("signatures", "docs", "source")
     *   Output: Method signatures, Javadocs, or full source code.
+    *   **Note**: If `artifactId` is omitted, the tool automatically selects the best available artifact (preferring those with source code attached).
 *   **`search_artifacts`**: Search for artifacts by coordinate (groupId, artifactId).
-*   **`search_implementations`**: Search for classes that implement a specific interface or extend a specific class.
+*   **`search_implementations`**: Search for classes that implement a specific interface or extend a specific class. Useful for finding SPI implementations in external libraries.
     *   Input: `className` (e.g. "java.util.List")
     *   Output: List of implementation/subclass names and their artifacts.
 *   **`refresh_index`**: Trigger a re-scan of the Maven repository.

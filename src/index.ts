@@ -58,7 +58,7 @@ server.registerTool(
 server.registerTool(
   "search_classes",
   {
-    description: "Search for Java classes in the local Maven repository. Use this to find classes from external dependencies/libraries when their source code is not available in the current workspace. You can search by class name (e.g. 'StringUtils') or keywords (e.g. 'Json').",
+    description: "Search for Java classes in the local Maven repository. WHEN TO USE: 1. You cannot find a class definition in the current project source (it's likely a dependency). 2. You need to read the source code, method signatures, or Javadocs of an external library class. 3. You need to verify which version of a library class is being used. Examples: 'Show me the source of StringUtils', 'What methods are available on DateTimeUtils?', 'Where is this class imported from?'.",
     inputSchema: z.object({
       className: z.string().describe("Fully qualified class name, partial name, or keywords describing the class purpose (e.g. 'JsonToXml')."),
     }),
@@ -84,7 +84,7 @@ server.registerTool(
 server.registerTool(
   "search_implementations",
   {
-    description: "Search for classes that implement a specific interface or extend a specific class. This is useful for finding implementations of SPIs or base classes.",
+    description: "Search for classes that implement a specific interface or extend a specific class. This is useful for finding implementations of SPIs or base classes, especially in external libraries.",
     inputSchema: z.object({
       className: z.string().describe("Fully qualified class name of the interface or base class (e.g. 'java.util.List')"),
     }),
@@ -109,15 +109,49 @@ server.registerTool(
 server.registerTool(
   "get_class_details",
   {
-    description: "Get details about a specific class from a Maven artifact. Use this to inspect external classes where source code is missing. It can provide method signatures (using javap), Javadocs, or even decompiled source code if the original source jar is unavailable.",
+    description: "Decompile and read the source code of external libraries/dependencies. Use this instead of 'SearchCodebase' for classes that are imported but defined in JAR files. Returns method signatures, Javadocs, or full source. Essential for verifying implementation details during refactoring. Don't guess what the library does—read the code. When reviewing usages of an external class, use this to retrieve the class definition to understand the context fully.",
     inputSchema: z.object({
       className: z.string().describe("Fully qualified class name"),
-      artifactId: z.number().describe("The internal ID of the artifact (returned by search_classes)"),
+      artifactId: z.number().optional().describe("The internal ID of the artifact. Optional: if not provided, the tool will automatically find the best match (preferring artifacts with source code)."),
       type: z.enum(["signatures", "docs", "source"]).describe("Type of detail to retrieve: 'signatures' (methods), 'docs' (javadocs + methods), 'source' (full source code)."),
     }),
   },
   async ({ className, artifactId, type }) => {
-      const artifact = indexer.getArtifactById(artifactId);
+      let targetArtifactId = artifactId;
+
+      // Auto-resolve artifact if ID is missing
+      if (!targetArtifactId) {
+          const matches = indexer.searchClass(className);
+          // Find exact match for class name
+          const exactMatch = matches.find(m => m.className === className);
+          
+          if (!exactMatch) {
+               // If no exact match, but we have some results, list them
+               if (matches.length > 0) {
+                   const suggestions = matches.map(m => `- ${m.className}`).join("\n");
+                   return { content: [{ type: "text", text: `Class '${className}' not found exactly. Did you mean:\n${suggestions}` }] };
+               }
+               return { content: [{ type: "text", text: `Class '${className}' not found in the index. Try 'search_classes' with a keyword if you are unsure of the full name.` }] };
+          }
+
+          // We have an exact match, choose the best artifact
+          // Strategy: 1. Prefer hasSource=true. 2. Prefer highest ID (likely newest).
+          const artifacts = exactMatch.artifacts.sort((a, b) => {
+              if (a.hasSource !== b.hasSource) {
+                  return a.hasSource ? -1 : 1; // source comes first
+              }
+              return b.id - a.id; // higher ID comes first
+          });
+
+          if (artifacts.length === 0) {
+              return { content: [{ type: "text", text: `Class '${className}' found but no artifacts are associated with it (database inconsistency).` }] };
+          }
+
+          targetArtifactId = artifacts[0].id;
+          // console.error(`Auto-resolved ${className} to artifact ${artifacts[0].groupId}:${artifacts[0].artifactId}:${artifacts[0].version} (ID: ${targetArtifactId})`);
+      }
+
+      const artifact = indexer.getArtifactById(targetArtifactId);
       if (!artifact) {
           return { content: [{ type: "text", text: "Artifact not found." }] };
       }
@@ -169,13 +203,16 @@ server.registerTool(
               return { content: [{ type: "text", text: `Class ${className} not found in artifact ${artifact.artifactId}. \nDebug info: ${debugInfo}${errorMsg}` }] };
           }
 
-          let resultText = `Class: ${detail.className}\n\n`;
+          let resultText = `Class: ${detail.className}\n`;
+          resultText += `Artifact: ${artifact.groupId}:${artifact.artifactId}:${artifact.version}\n\n`; // Inform user which artifact was used
+          
           if (usedDecompilation) {
               resultText += "*Source code decompiled from binary class file.*\n\n";
           }
           
           if (type === 'source') {
-              resultText += "```java\n" + detail.source + "\n```";
+              const lang = detail.language || 'java';
+              resultText += "```" + lang + "\n" + detail.source + "\n```";
           } else {
               if (detail.doc) {
                   resultText += "Documentation:\n" + detail.doc + "\n\n";

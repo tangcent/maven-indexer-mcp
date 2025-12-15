@@ -12,6 +12,7 @@ export interface ClassDetail {
   source?: string;
   signatures?: string[];
   doc?: string;
+  language?: string;
 }
 
 export class SourceParser {
@@ -46,6 +47,7 @@ export class SourceParser {
             zipfile.on('entry', (entry) => {
                 if (candidates.includes(entry.fileName)) {
                     found = true;
+                    const language = entry.fileName.endsWith('.kt') ? 'kotlin' : 'java';
                     zipfile.openReadStream(entry, (err, readStream) => {
                         if (err || !readStream) {
                             resolve(null);
@@ -56,7 +58,7 @@ export class SourceParser {
                         readStream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
                         readStream.on('end', () => {
                             const source = Buffer.concat(chunks).toString('utf-8');
-                            resolve(SourceParser.parse(className, source, type));
+                            resolve(SourceParser.parse(className, source, type, language));
                         });
                     });
                 } else {
@@ -108,12 +110,13 @@ export class SourceParser {
           }
           
           if (stdout) {
-              return this.parse(className, stdout, type);
+              return this.parse(className, stdout, type, 'java');
           }
 
           return {
               className,
-              source: stdout // Return as source
+              source: stdout, // Return as source
+              language: 'java'
           };
       } catch (e: any) {
           console.error(`CFR failed for ${className} in ${jarPath}:`, e.message);
@@ -141,7 +144,8 @@ export class SourceParser {
       
       return {
         className,
-        signatures: lines
+        signatures: lines,
+        language: 'java'
       };
     } catch (e) {
       // Fallback or error
@@ -151,9 +155,9 @@ export class SourceParser {
     }
   }
 
-  private static parse(className: string, source: string, type: 'signatures' | 'docs' | 'source'): ClassDetail {
+  private static parse(className: string, source: string, type: 'signatures' | 'docs' | 'source', language: string = 'java'): ClassDetail {
       if (type === 'source') {
-          return { className, source };
+          return { className, source, language };
       }
 
       // Very simple regex-based parsing to extract methods and javadocs
@@ -209,7 +213,8 @@ export class SourceParser {
       return {
           className,
           signatures,
-          doc: type === 'docs' ? allDocs.join('\n\n') : undefined
+          doc: type === 'docs' ? allDocs.join('\n\n') : undefined,
+          language
       };
   }
 }

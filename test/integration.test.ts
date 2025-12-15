@@ -147,5 +147,41 @@ describe('Maven Indexer Integration', () => {
         const docs = await SourceParser.getClassDetail(sourceJar, 'com.test.demo.TestUtils', 'docs');
         expect(docs).not.toBeNull();
         expect(docs?.doc).toContain('Echoes the string');
+        expect(docs?.language).toBe('java');
+    });
+
+    it('should detect kotlin source', async () => {
+        const { SourceParser } = await import('../src/source_parser');
+        
+        // Create a fake sources jar with a .kt file
+        const artifactDir = path.join(TEST_REPO_DIR, 'com/test/demo/1.0.0');
+        const ktSourceJar = path.join(artifactDir, 'demo-1.0.0-kt-sources.jar');
+        
+        // We need to create the directory structure inside the zip
+        const ktSrcDir = path.join(TEST_REPO_DIR, 'kt_src_tmp');
+        const ktPkgDir = path.join(ktSrcDir, 'com/test/demo');
+        fs.mkdirSync(ktPkgDir, { recursive: true });
+        
+        const ktContent = `
+package com.test.demo
+class KotlinUtils {
+    fun echo(input: String): String = input
+}
+        `;
+        fs.writeFileSync(path.join(ktPkgDir, 'KotlinUtils.kt'), ktContent);
+        
+        // Create zip
+        // cd ktSrcDir && zip -r ktSourceJar .
+        try {
+             execSync(`cd "${ktSrcDir}" && zip -r "${ktSourceJar}" .`);
+        } catch (e) {
+            console.warn("zip command failed, skipping kotlin test");
+            return;
+        }
+        
+        const detail = await SourceParser.getClassDetail(ktSourceJar, 'com.test.demo.KotlinUtils', 'source');
+        expect(detail).not.toBeNull();
+        expect(detail?.language).toBe('kotlin');
+        expect(detail?.source).toContain('fun echo');
     });
 });
