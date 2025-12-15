@@ -181,7 +181,10 @@ server.registerTool(
           
           // If not found in source jar (or no source jar), try main jar (decompilation)
           if (!detail) {
-             const mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+             let mainJarPath = artifact.abspath;
+             if (!mainJarPath.endsWith('.jar')) {
+                 mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+             }
              try {
                  // SourceParser will try to decompile if source file not found in jar
                  detail = await SourceParser.getClassDetail(mainJarPath, className, type);
@@ -195,7 +198,10 @@ server.registerTool(
           }
       } else {
           // Signatures -> Use Main JAR
-          const mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+          let mainJarPath = artifact.abspath;
+          if (!mainJarPath.endsWith('.jar')) {
+              mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+          }
           try {
               detail = await SourceParser.getClassDetail(mainJarPath, className, type);
           } catch (e: any) {
