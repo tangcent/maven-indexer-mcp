@@ -1,6 +1,8 @@
 import fs from 'fs/promises';
+import { createWriteStream } from 'fs';
 import path from 'path';
 import os from 'os';
+import https from 'https';
 import xml2js from 'xml2js';
 import { fileURLToPath } from 'url';
 
@@ -87,6 +89,16 @@ export class Config {
         this.cfrPath = path.resolve(__dirname, '../lib/cfr-0.152.jar');
     }
 
+    if (this.cfrPath && !(await this.fileExists(this.cfrPath))) {
+        try {
+            console.error(`CFR jar not found at ${this.cfrPath}, attempting to download...`);
+            await this.downloadCfr(this.cfrPath);
+            console.error(`Successfully downloaded CFR jar to ${this.cfrPath}`);
+        } catch (e: any) {
+             console.error(`Failed to download CFR jar: ${e.message}`);
+        }
+    }
+
     // Log to stderr so it doesn't interfere with MCP protocol on stdout
     console.error(`Using local repository: ${this.localRepository}`);
     console.error(`Using Java binary: ${this.javaBinary}`);
@@ -104,6 +116,46 @@ export class Config {
     if (this.javaBinary === 'java') return 'javap';
     const dir = path.dirname(this.javaBinary);
     return path.join(dir, 'javap');
+  }
+
+  private async downloadCfr(destPath: string): Promise<void> {
+    const url = "https://github.com/tangcent/maven-indexer-mcp/raw/refs/heads/main/lib/cfr-0.152.jar";
+    const dir = path.dirname(destPath);
+    
+    await fs.mkdir(dir, { recursive: true });
+
+    return new Promise((resolve, reject) => {
+        const download = (currentUrl: string) => {
+            https.get(currentUrl, (response) => {
+                if (response.statusCode === 301 || response.statusCode === 302) {
+                    if (response.headers.location) {
+                        download(response.headers.location);
+                        return;
+                    }
+                }
+                
+                if (response.statusCode !== 200) {
+                    reject(new Error(`Failed to download CFR jar: Status Code ${response.statusCode}`));
+                    return;
+                }
+
+                const file = createWriteStream(destPath);
+                response.pipe(file);
+                file.on('finish', () => {
+                    // @ts-ignore
+                    file.close();
+                    resolve();
+                });
+                file.on('error', (err) => {
+                     fs.unlink(destPath).catch(() => {});
+                     reject(err);
+                });
+            }).on('error', (err) => {
+                reject(err);
+            });
+        };
+        download(url);
+    });
   }
 
   private async fileExists(filePath: string): Promise<boolean> {

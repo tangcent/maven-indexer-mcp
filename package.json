@@ -9,6 +9,7 @@
   },
   "files": [
     "build",
+    "lib",
     "README.md",
     "LICENSE"
   ],
