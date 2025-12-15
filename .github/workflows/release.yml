@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit message
+        id: check_commit
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          if [[ "$COMMIT_MSG" =~ ^(chore\(release\)|release):[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract version
+        id: extract_version
+        if: steps.check_commit.outputs.should_release == 'true'
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          # Add 'v' prefix if not present
+          if [[ ! "$VERSION" =~ ^v ]]; then
+            VERSION="v$VERSION"
+          fi
+          echo "Extracted version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag exists
+        id: check_tag
+        if: steps.check_commit.outputs.should_release == 'true'
+        run: |
+          if git tag -l "${{ steps.extract_version.outputs.version }}" | grep -q "${{ steps.extract_version.outputs.version }}"; then
+            echo "Tag ${{ steps.extract_version.outputs.version }} already exists. Skipping release creation."
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "Tag ${{ steps.extract_version.outputs.version }} does not exist. Proceeding with release creation."
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Node.js
+        if: steps.check_tag.outputs.should_release == 'true'
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Set up JDK 11
+        if: steps.check_tag.outputs.should_release == 'true'
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Install dependencies
+        if: steps.check_tag.outputs.should_release == 'true'
+        run: npm ci
+
+      - name: Build
+        if: steps.check_tag.outputs.should_release == 'true'
+        run: npm run build
+
+      - name: Pack
+        if: steps.check_tag.outputs.should_release == 'true'
+        run: npm pack
+
+      - name: Generate Release Notes
+        if: steps.check_tag.outputs.should_release == 'true'
+        id: generate_notes
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "v0.0.0")
+          CURRENT_TAG=${{ steps.extract_version.outputs.version }}
+          
+          # Generate the release notes
+          NOTES="**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${CURRENT_TAG}\n\n"
+          
+          # Add commit messages since last tag
+          COMMITS=$(git log --pretty=format:"* %s" $PREV_TAG..HEAD | grep -E '^\* (refactor|feat|fix)')
+          NOTES="${NOTES}${COMMITS}\n\n"
+          
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: steps.check_tag.outputs.should_release == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.extract_version.outputs.version }}
+          name: ${{ steps.extract_version.outputs.version }}
+          body: ${{ steps.generate_notes.outputs.notes }}
+          draft: true
+          prerelease: true
+          files: |
+            *.tgz
