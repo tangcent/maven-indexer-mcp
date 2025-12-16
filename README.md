@@ -86,7 +86,7 @@ If you prefer to run from source:
 
 ## Available Tools
 
-*   **`search_classes`**: Search for Java classes in the local Maven repository (dependencies).
+*   **`search_classes`**: Search for Java classes in the local Maven repository and Gradle caches.
     *   **WHEN TO USE**:
         1.  You cannot find a class definition in the current project source (it's likely a dependency).
         2.  You need to read the source code, method signatures, or Javadocs of an external library class.
@@ -100,7 +100,7 @@ If you prefer to run from source:
     *   Input: `className` (required), `artifactId` (optional), `type` ("signatures", "docs", "source")
     *   Output: Method signatures, Javadocs, or full source code.
     *   **Note**: If `artifactId` is omitted, the tool automatically selects the best available artifact (preferring those with source code attached).
-*   **`search_artifacts`**: Search for artifacts by coordinate (groupId, artifactId).
+*   **`search_artifacts`**: Search for artifacts in Maven/Gradle caches by coordinate (groupId, artifactId).
 *   **`search_implementations`**: Search for classes that implement a specific interface or extend a specific class. Useful for finding SPI implementations in external libraries.
     *   Input: `className` (e.g. "java.util.List")
     *   Output: List of implementation/subclass names and their artifacts.

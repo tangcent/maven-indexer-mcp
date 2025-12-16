@@ -29,7 +29,7 @@ indexer.index().then(() => {
 server.registerTool(
   "search_artifacts",
   {
-    description: "Search for Maven artifacts (libraries) in the local repository by coordinate (groupId, artifactId) or keyword. Use this to find available versions of a library.",
+    description: "Search for Maven artifacts (libraries) in the local Maven repository and Gradle caches by coordinate (groupId, artifactId) or keyword. Use this to find available versions of a library.",
     inputSchema: z.object({
       query: z.string().describe("Search query (groupId, artifactId, or keyword)"),
     }),
@@ -58,7 +58,7 @@ server.registerTool(
 server.registerTool(
   "search_classes",
   {
-    description: "Search for Java classes in the local Maven repository. WHEN TO USE: 1. You cannot find a class definition in the current project source (it's likely a dependency). 2. You need to read the source code, method signatures, or Javadocs of an external library class. 3. You need to verify which version of a library class is being used. Examples: 'Show me the source of StringUtils', 'What methods are available on DateTimeUtils?', 'Where is this class imported from?'.",
+    description: "Search for Java classes in the local Maven repository and Gradle caches. WHEN TO USE: 1. You cannot find a class definition in the current project source (it's likely a dependency). 2. You need to read the source code, method signatures, or Javadocs of an external library class. 3. You need to verify which version of a library class is being used. Examples: 'Show me the source of StringUtils', 'What methods are available on DateTimeUtils?', 'Where is this class imported from?'.",
     inputSchema: z.object({
       className: z.string().describe("Fully qualified class name, partial name, or keywords describing the class purpose (e.g. 'JsonToXml')."),
     }),
@@ -84,7 +84,7 @@ server.registerTool(
 server.registerTool(
   "search_implementations",
   {
-    description: "Search for classes that implement a specific interface or extend a specific class. This is useful for finding implementations of SPIs or base classes, especially in external libraries.",
+    description: "Search for classes that implement a specific interface or extend a specific class. This is useful for finding implementations of SPIs or base classes, especially in external libraries (Maven or Gradle).",
     inputSchema: z.object({
       className: z.string().describe("Fully qualified class name of the interface or base class (e.g. 'java.util.List')"),
     }),
