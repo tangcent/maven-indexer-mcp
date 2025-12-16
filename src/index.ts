@@ -14,6 +14,7 @@ const server = new McpServer(
   {
     capabilities: {
       tools: {},
+      prompts: {},
     },
   }
 );
@@ -27,56 +28,232 @@ indexer.index().then(() => {
 }).catch(err => console.error("Initial indexing failed:", err));
 
 server.registerTool(
-  "search_artifacts",
+  "get_class_details",
   {
-    description: "Search for Maven artifacts (libraries) in the local Maven repository and Gradle caches by coordinate (groupId, artifactId) or keyword. Use this to find available versions of a library.",
+    description: "Retrieve the source code for a class from the **local Maven/Gradle cache** (containing **internal company libraries**). This tool identifies the containing artifact and returns the source code. It prefers actual source files but will fall back to decompilation if necessary. **Use this primarily for internal company libraries** that are not present in the current workspace. **IMPORTANT: Even if the code compiles and imports work, the source code might not be in the current workspace (it comes from a compiled internal library).** Use this tool to see the actual implementation of those internal libraries. Supports batch queries.",
     inputSchema: z.object({
-      query: z.string().describe("Search query (groupId, artifactId, or keyword)"),
+      className: z.string().optional().describe("Fully qualified class name"),
+      classNames: z.array(z.string()).optional().describe("Batch class names"),
+      coordinate: z.string().optional().describe("The Maven coordinate of the artifact (groupId:artifactId:version). Optional: if not provided, the tool will automatically find the best match (preferring artifacts with source code). Applies to all classes in batch mode."),
+      type: z.enum(["signatures", "docs", "source"]).describe("Type of detail to retrieve: 'signatures' (methods), 'docs' (javadocs + methods), 'source' (full source code)."),
     }),
   },
-  async ({ query }) => {
-    const matches = indexer.search(query);
-    
-    // Limit results to avoid overflow
-    const limitedMatches = matches.slice(0, 20);
-    
-    const text = limitedMatches.length > 0
-        ? limitedMatches.map(a => `${a.groupId}:${a.artifactId}:${a.version} (Has Source: ${a.hasSource})`).join("\n")
-        : "No artifacts found matching the query.";
+  async ({ className, classNames, coordinate, type }) => {
+      const resolveOne = async (clsName: string, coord?: string) => {
+          let targetArtifact: import("./indexer.js").Artifact | undefined;
+
+          if (coord) {
+              const parts = coord.split(':');
+              if (parts.length === 3) {
+                 targetArtifact = indexer.getArtifactByCoordinate(parts[0], parts[1], parts[2]);
+              } else {
+                 return "Invalid coordinate format. Expected groupId:artifactId:version";
+              }
+              if (!targetArtifact) {
+                  return `Artifact ${coord} not found in index.`;
+              }
+          } else {
+              // Auto-resolve artifact if coordinate is missing
+              const matches = indexer.searchClass(clsName);
+              // Find exact match for class name
+              const exactMatch = matches.find(m => m.className === clsName);
+              
+              if (!exactMatch) {
+                   // If no exact match, but we have some results, list them
+                   if (matches.length > 0) {
+                       const suggestions = matches.map(m => `- ${m.className}`).join("\n");
+                       return `Class '${clsName}' not found exactly. Did you mean:\n${suggestions}`;
+                   }
+                   return `Class '${clsName}' not found in the index. Try 'search_classes' with a keyword if you are unsure of the full name.`;
+              }
+
+              // We have an exact match, choose the best artifact
+              // Strategy: 1. Prefer hasSource=true. 2. Prefer highest ID (likely newest).
+              const artifacts = exactMatch.artifacts.sort((a, b) => {
+                  if (a.hasSource !== b.hasSource) {
+                      return a.hasSource ? -1 : 1; // source comes first
+                  }
+                  return b.id - a.id; // higher ID comes first
+              });
+
+              if (artifacts.length === 0) {
+                  return `Class '${clsName}' found but no artifacts are associated with it (database inconsistency).`;
+              }
+
+              targetArtifact = artifacts[0];
+          }
+
+          const artifact = targetArtifact;
+
+          let detail: Awaited<ReturnType<typeof SourceParser.getClassDetail>> = null;
+          let usedDecompilation = false;
+          let lastError = "";
+
+          // 1. If requesting source/docs, try Source JAR first
+          if (type === 'source' || type === 'docs') {
+              if (artifact.hasSource) {
+                  const sourceJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}-sources.jar`);
+                  try {
+                      detail = await SourceParser.getClassDetail(sourceJarPath, clsName, type);
+                  } catch (e: any) {
+                      // Ignore error and fallthrough to main jar (decompilation)
+                      lastError = e.message;
+                  }
+              }
+              
+              // If not found in source jar (or no source jar), try main jar (decompilation)
+              if (!detail) {
+                 let mainJarPath = artifact.abspath;
+                 if (!mainJarPath.endsWith('.jar')) {
+                     mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+                 }
+                 try {
+                     // SourceParser will try to decompile if source file not found in jar
+                     detail = await SourceParser.getClassDetail(mainJarPath, clsName, type);
+                     if (detail && detail.source) {
+                         usedDecompilation = true;
+                     }
+                 } catch (e: any) {
+                     console.error(`Decompilation/MainJar access failed: ${e.message}`);
+                     lastError = e.message;
+                 }
+              }
+          } else {
+              // Signatures -> Use Main JAR
+              let mainJarPath = artifact.abspath;
+              if (!mainJarPath.endsWith('.jar')) {
+                  mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
+              }
+              try {
+                  detail = await SourceParser.getClassDetail(mainJarPath, clsName, type);
+              } catch (e: any) {
+                  lastError = e.message;
+              }
+          }
+          
+          try {
+              if (!detail) {
+                  const debugInfo = `Artifact path: ${artifact.abspath}, hasSource: ${artifact.hasSource}`;
+                  const errorMsg = lastError ? `\nLast error: ${lastError}` : "";
+                  return `Class ${clsName} not found in artifact ${artifact.artifactId}. \nDebug info: ${debugInfo}${errorMsg}`;
+              }
+
+              let resultText = `### Class: ${detail.className}\n`;
+              resultText += `Artifact: ${artifact.groupId}:${artifact.artifactId}:${artifact.version}\n\n`; // Inform user which artifact was used
+              
+              if (usedDecompilation) {
+                  resultText += "*Source code decompiled from binary class file.*\n\n";
+              }
+              
+              if (type === 'source') {
+                  const lang = detail.language || 'java';
+                  resultText += "```" + lang + "\n" + detail.source + "\n```";
+              } else {
+                  if (detail.doc) {
+                      resultText += "Documentation:\n" + detail.doc + "\n\n";
+                  }
+                  if (detail.signatures) {
+                      resultText += "Methods:\n" + detail.signatures.join("\n") + "\n";
+                  }
+              }
+
+              return resultText;
+          } catch (e: any) {
+              return `Error reading source: ${e.message}`;
+          }
+      };
+
+      const allNames: string[] = [];
+      if (className) allNames.push(className);
+      if (classNames) allNames.push(...classNames);
+
+      if (allNames.length === 0) {
+          return { content: [{ type: "text", text: "No class name provided." }] };
+      }
+
+      const results = await Promise.all(allNames.map(name => resolveOne(name, coordinate)));
+
+      return { content: [{ type: "text", text: results.join("\n\n") }] };
+  }
+);
+
+server.registerTool(
+  "search_artifacts",
+  {
+    description: "Search for **internal company artifacts** and libraries in the local Maven repository and Gradle caches by coordinate (groupId, artifactId) or keyword. **Use this primarily for internal company packages** or to find available versions of internal projects that are locally built. Also supports searching third-party libraries in the local cache. Supports batch queries.",
+    inputSchema: z.object({
+      query: z.string().optional().describe("Search query (groupId, artifactId, or keyword)"),
+      queries: z.array(z.string()).optional().describe("Batch search queries"),
+    }),
+  },
+  async ({ query, queries }) => {
+    const allQueries: string[] = [];
+    if (query) allQueries.push(query);
+    if (queries) allQueries.push(...queries);
+
+    if (allQueries.length === 0) {
+        return { content: [{ type: "text", text: "No query provided." }] };
+    }
+
+    const results = allQueries.map(q => {
+        const matches = indexer.search(q);
+        
+        // Limit results to avoid overflow
+        const limitedMatches = matches.slice(0, 20);
+        
+        const text = limitedMatches.length > 0
+            ? limitedMatches.map(a => `${a.groupId}:${a.artifactId}:${a.version} (Has Source: ${a.hasSource})`).join("\n")
+            : "No artifacts found matching the query.";
+
+        return `### Results for "${q}" (Found ${matches.length}${matches.length > 20 ? ', showing first 20' : ''}):\n${text}`;
+    });
 
     return {
       content: [
         {
           type: "text",
-          text: `Found ${matches.length} matches${matches.length > 20 ? ' (showing first 20)' : ''}:\n${text}`,
+          text: results.join("\n\n"),
         },
       ],
-    };
+    }
   }
 );
 
 server.registerTool(
   "search_classes",
   {
-    description: "Search for Java classes in the local Maven repository and Gradle caches. WHEN TO USE: 1. You cannot find a class definition in the current project source (it's likely a dependency). 2. You need to read the source code, method signatures, or Javadocs of an external library class. 3. You need to verify which version of a library class is being used. Examples: 'Show me the source of StringUtils', 'What methods are available on DateTimeUtils?', 'Where is this class imported from?'.",
+    description: "Search for Java classes in **internal company libraries** found in the local Maven/Gradle caches. **Essential for finding classes in internal company libraries** that are not part of the current workspace source code. Use this when you see an import (e.g., 'com.company.util.Helper') but cannot find the definition. **Do not assume that because the code compiles or the import exists, the source is local.** It often comes from a compiled **internal library**. This tool helps locate the defining artifact. Supports batch queries.",
     inputSchema: z.object({
-      className: z.string().describe("Fully qualified class name, partial name, or keywords describing the class purpose (e.g. 'JsonToXml')."),
+      className: z.string().optional().describe("Fully qualified class name, partial name, or keywords describing the class purpose (e.g. 'JsonToXml')."),
+      classNames: z.array(z.string()).optional().describe("Batch class names"),
     }),
   },
-  async ({ className }) => {
-    const matches = indexer.searchClass(className);
+  async ({ className, classNames }) => {
+    const allNames: string[] = [];
+    if (className) allNames.push(className);
+    if (classNames) allNames.push(...classNames);
 
-    const text = matches.length > 0
-        ? matches.map(m => {
-            // Group by artifact ID to allow easy selection
-            const artifacts = m.artifacts.slice(0, 5).map(a => `${a.groupId}:${a.artifactId}:${a.version}${a.hasSource ? ' (Has Source)' : ''}`).join("\n    ");
-            const more = m.artifacts.length > 5 ? `\n    ... (${m.artifacts.length - 5} more versions)` : '';
-            return `Class: ${m.className}\n    ${artifacts}${more}`;
-        }).join("\n\n")
-        : "No classes found matching the query. Try different keywords.";
+    if (allNames.length === 0) {
+        return { content: [{ type: "text", text: "No class name provided." }] };
+    }
+
+    const results = allNames.map(name => {
+        const matches = indexer.searchClass(name);
+
+        const text = matches.length > 0
+            ? matches.map(m => {
+                // Group by artifact ID to allow easy selection
+                const artifacts = m.artifacts.slice(0, 5).map(a => `${a.groupId}:${a.artifactId}:${a.version}${a.hasSource ? ' (Has Source)' : ''}`).join("\n    ");
+                const more = m.artifacts.length > 5 ? `\n    ... (${m.artifacts.length - 5} more versions)` : '';
+                return `Class: ${m.className}\n    ${artifacts}${more}`;
+            }).join("\n\n")
+            : "No classes found matching the query. Try different keywords.";
+        
+        return `### Results for "${name}":\n${text}`;
+    });
 
     return {
-        content: [{ type: "text", text }]
+        content: [{ type: "text", text: results.join("\n\n") }]
     };
   }
 );
@@ -84,161 +261,38 @@ server.registerTool(
 server.registerTool(
   "search_implementations",
   {
-    description: "Search for classes that implement a specific interface or extend a specific class. This is useful for finding implementations of SPIs or base classes, especially in external libraries (Maven or Gradle).",
+    description: "Search for **internal implementations** of an interface or base class. **This is particularly useful for finding implementations of SPIs or base classes within internal company libraries** in the local Maven/Gradle cache. Supports batch queries.",
     inputSchema: z.object({
-      className: z.string().describe("Fully qualified class name of the interface or base class (e.g. 'java.util.List')"),
+      className: z.string().optional().describe("Fully qualified class name of the interface or base class (e.g. 'java.util.List')"),
+      classNames: z.array(z.string()).optional().describe("Batch class names"),
     }),
   },
-  async ({ className }) => {
-    const matches = indexer.searchImplementations(className);
+  async ({ className, classNames }) => {
+    const allNames: string[] = [];
+    if (className) allNames.push(className);
+    if (classNames) allNames.push(...classNames);
 
-    const text = matches.length > 0
-        ? matches.map(m => {
-            const artifacts = m.artifacts.slice(0, 5).map(a => `${a.groupId}:${a.artifactId}:${a.version}`).join("\n    ");
-            const more = m.artifacts.length > 5 ? `\n    ... (${m.artifacts.length - 5} more versions)` : '';
-            return `Implementation: ${m.className}\n    ${artifacts}${more}`;
-        }).join("\n\n")
-        : `No implementations found for ${className}. Ensure the index is up to date and the class name is correct.`;
+    if (allNames.length === 0) {
+        return { content: [{ type: "text", text: "No class name provided." }] };
+    }
+
+    const results = allNames.map(name => {
+        const matches = indexer.searchImplementations(name);
+
+        const text = matches.length > 0
+            ? matches.map(m => {
+                const artifacts = m.artifacts.slice(0, 5).map(a => `${a.groupId}:${a.artifactId}:${a.version}`).join("\n    ");
+                const more = m.artifacts.length > 5 ? `\n    ... (${m.artifacts.length - 5} more versions)` : '';
+                return `Implementation: ${m.className}\n    ${artifacts}${more}`;
+            }).join("\n\n")
+            : `No implementations found for ${name}. Ensure the index is up to date and the class name is correct.`;
+        
+        return `### Results for "${name}":\n${text}`;
+    });
 
     return {
-        content: [{ type: "text", text }]
+        content: [{ type: "text", text: results.join("\n\n") }]
     };
-  }
-);
-
-server.registerTool(
-  "get_class_details",
-  {
-    description: "Decompile and read the source code of external libraries/dependencies. Use this instead of 'SearchCodebase' for classes that are imported but defined in JAR files. Returns method signatures, Javadocs, or full source. Essential for verifying implementation details during refactoring. Don't guess what the library does—read the code. When reviewing usages of an external class, use this to retrieve the class definition to understand the context fully.",
-    inputSchema: z.object({
-      className: z.string().describe("Fully qualified class name"),
-      coordinate: z.string().optional().describe("The Maven coordinate of the artifact (groupId:artifactId:version). Optional: if not provided, the tool will automatically find the best match (preferring artifacts with source code)."),
-      type: z.enum(["signatures", "docs", "source"]).describe("Type of detail to retrieve: 'signatures' (methods), 'docs' (javadocs + methods), 'source' (full source code)."),
-    }),
-  },
-  async ({ className, coordinate, type }) => {
-      let targetArtifact: import("./indexer.js").Artifact | undefined;
-
-      if (coordinate) {
-          const parts = coordinate.split(':');
-          if (parts.length === 3) {
-             targetArtifact = indexer.getArtifactByCoordinate(parts[0], parts[1], parts[2]);
-          } else {
-             return { content: [{ type: "text", text: "Invalid coordinate format. Expected groupId:artifactId:version" }] };
-          }
-          if (!targetArtifact) {
-              return { content: [{ type: "text", text: `Artifact ${coordinate} not found in index.` }] };
-          }
-      } else {
-          // Auto-resolve artifact if coordinate is missing
-          const matches = indexer.searchClass(className);
-          // Find exact match for class name
-          const exactMatch = matches.find(m => m.className === className);
-          
-          if (!exactMatch) {
-               // If no exact match, but we have some results, list them
-               if (matches.length > 0) {
-                   const suggestions = matches.map(m => `- ${m.className}`).join("\n");
-                   return { content: [{ type: "text", text: `Class '${className}' not found exactly. Did you mean:\n${suggestions}` }] };
-               }
-               return { content: [{ type: "text", text: `Class '${className}' not found in the index. Try 'search_classes' with a keyword if you are unsure of the full name.` }] };
-          }
-
-          // We have an exact match, choose the best artifact
-          // Strategy: 1. Prefer hasSource=true. 2. Prefer highest ID (likely newest).
-          const artifacts = exactMatch.artifacts.sort((a, b) => {
-              if (a.hasSource !== b.hasSource) {
-                  return a.hasSource ? -1 : 1; // source comes first
-              }
-              return b.id - a.id; // higher ID comes first
-          });
-
-          if (artifacts.length === 0) {
-              return { content: [{ type: "text", text: `Class '${className}' found but no artifacts are associated with it (database inconsistency).` }] };
-          }
-
-          targetArtifact = artifacts[0];
-          // console.error(`Auto-resolved ${className} to artifact ${artifacts[0].groupId}:${artifacts[0].artifactId}:${artifacts[0].version} (ID: ${targetArtifact.id})`);
-      }
-
-      const artifact = targetArtifact;
-
-      let detail: Awaited<ReturnType<typeof SourceParser.getClassDetail>> = null;
-      let usedDecompilation = false;
-      let lastError = "";
-
-      // 1. If requesting source/docs, try Source JAR first
-      if (type === 'source' || type === 'docs') {
-          if (artifact.hasSource) {
-              const sourceJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}-sources.jar`);
-              try {
-                  detail = await SourceParser.getClassDetail(sourceJarPath, className, type);
-              } catch (e: any) {
-                  // Ignore error and fallthrough to main jar (decompilation)
-                  lastError = e.message;
-              }
-          }
-          
-          // If not found in source jar (or no source jar), try main jar (decompilation)
-          if (!detail) {
-             let mainJarPath = artifact.abspath;
-             if (!mainJarPath.endsWith('.jar')) {
-                 mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
-             }
-             try {
-                 // SourceParser will try to decompile if source file not found in jar
-                 detail = await SourceParser.getClassDetail(mainJarPath, className, type);
-                 if (detail && detail.source) {
-                     usedDecompilation = true;
-                 }
-             } catch (e: any) {
-                 console.error(`Decompilation/MainJar access failed: ${e.message}`);
-                 lastError = e.message;
-             }
-          }
-      } else {
-          // Signatures -> Use Main JAR
-          let mainJarPath = artifact.abspath;
-          if (!mainJarPath.endsWith('.jar')) {
-              mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
-          }
-          try {
-              detail = await SourceParser.getClassDetail(mainJarPath, className, type);
-          } catch (e: any) {
-              lastError = e.message;
-          }
-      }
-      
-      try {
-          if (!detail) {
-              const debugInfo = `Artifact path: ${artifact.abspath}, hasSource: ${artifact.hasSource}`;
-              const errorMsg = lastError ? `\nLast error: ${lastError}` : "";
-              return { content: [{ type: "text", text: `Class ${className} not found in artifact ${artifact.artifactId}. \nDebug info: ${debugInfo}${errorMsg}` }] };
-          }
-
-          let resultText = `Class: ${detail.className}\n`;
-          resultText += `Artifact: ${artifact.groupId}:${artifact.artifactId}:${artifact.version}\n\n`; // Inform user which artifact was used
-          
-          if (usedDecompilation) {
-              resultText += "*Source code decompiled from binary class file.*\n\n";
-          }
-          
-          if (type === 'source') {
-              const lang = detail.language || 'java';
-              resultText += "```" + lang + "\n" + detail.source + "\n```";
-          } else {
-              if (detail.doc) {
-                  resultText += "Documentation:\n" + detail.doc + "\n\n";
-              }
-              if (detail.signatures) {
-                  resultText += "Methods:\n" + detail.signatures.join("\n") + "\n";
-              }
-          }
-
-          return { content: [{ type: "text", text: resultText }] };
-      } catch (e: any) {
-          return { content: [{ type: "text", text: `Error reading source: ${e.message}` }] };
-      }
   }
 );
 

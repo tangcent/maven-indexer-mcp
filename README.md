@@ -2,6 +2,12 @@
 
 A Model Context Protocol (MCP) server that indexes your local Maven repository (`~/.m2/repository`) and Gradle cache (`~/.gradle/caches/modules-2/files-2.1`) to provide AI agents with tools to search for Java classes, method signatures, and source code.
 
+**Key Use Case**: While AI models are well-versed in popular public libraries (like Spring, Apache Commons, Guava), they often struggle with:
+1.  **Internal Company Packages**: Private libraries that are not public.
+2.  **Non-Well-Known Public Packages**: Niche or less popular open-source libraries.
+
+This server bridges that gap by allowing the AI to "read" your local dependencies, effectively giving it knowledge of your private and obscure libraries.
+
 ## Features
 
 *   **Semantic Class Search**: Search for classes by name (e.g., `StringUtils`) or purpose (e.g., `JsonToXml`).
@@ -88,15 +94,16 @@ If you prefer to run from source:
 
 *   **`search_classes`**: Search for Java classes in the local Maven repository and Gradle caches.
     *   **WHEN TO USE**:
-        1.  You cannot find a class definition in the current project source (it's likely a dependency).
-        2.  You need to read the source code, method signatures, or Javadocs of an external library class.
-        3.  You need to verify which version of a library class is being used.
+        1.  **Internal/Private Code**: You need to find a class from a company-internal library.
+        2.  **Obscure Libraries**: You are using a less common public library that the AI doesn't know well.
+        3.  **Version Verification**: You need to check exactly which version of a class is present locally.
+        *   *Note*: For well-known libraries (e.g., standard Java lib, Spring), the AI likely knows the class structure already, so this tool is less critical.
     *   **Examples**: "Show me the source of StringUtils", "What methods are available on DateTimeUtils?", "Where is this class imported from?".
     *   Input: `className` (e.g., "StringUtils", "Json parser")
     *   Output: List of matching classes with their artifacts.
 *   **`get_class_details`**: Decompile and read the source code of external libraries/dependencies. **Use this instead of 'SearchCodebase' for classes that are imported but defined in JAR files.**
-    *   **Key Value**: "Don't guess what the library does—read the code."
-    *   **Tip**: When reviewing usages of an external class, use this to retrieve the class definition to understand the context fully.
+    *   **Key Value**: "Don't guess what the internal library does—read the code."
+    *   **Tip**: Essential for internal/proprietary code where documentation is scarce or non-existent.
     *   Input: `className` (required), `artifactId` (optional), `type` ("signatures", "docs", "source")
     *   Output: Method signatures, Javadocs, or full source code.
     *   **Note**: If `artifactId` is omitted, the tool automatically selects the best available artifact (preferring those with source code attached).
