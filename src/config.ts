@@ -12,6 +12,7 @@ export class Config {
   public gradleRepository: string = "";
   public javaBinary: string = "java";
   public includedPackages: string[] = ["*"];
+  public normalizedIncludedPackages: string[] = [];
   public cfrPath: string | null = null;
 
   private constructor() {}
@@ -90,6 +91,7 @@ export class Config {
         .map(p => p.trim())
         .filter(p => p.length > 0);
     }
+    this.normalizedIncludedPackages = this.normalizeScanPatterns(this.includedPackages);
 
     // Load CFR Path
     if (process.env.MAVEN_INDEXER_CFR_PATH) {
@@ -192,5 +194,60 @@ export class Config {
       console.error(`Failed to parse ${filePath}:`, error);
     }
     return null;
+  }
+
+  /**
+   * Normalizes package patterns for scanning.
+   * 1. Filters out empty or whitespace-only patterns.
+   * 2. Removes wildcards ('*', '.*').
+   * 3. Sorts and removes duplicates/sub-packages.
+   *
+   * @param patterns The raw patterns from configuration.
+   * @returns A list of normalized package prefixes. Returns [] if all packages should be scanned.
+   */
+  private normalizeScanPatterns(patterns: string[]): string[] {
+      if (!patterns || patterns.length === 0) {
+          return [];
+      }
+
+      // 1. Filter empty/blank patterns and remove wildcards
+      let clean = patterns
+          .map(p => p.trim())
+          .filter(p => p.length > 0) // Ignore empty strings
+          .map(p => {
+              if (p.endsWith('.*')) return p.slice(0, -2);
+              if (p === '*') return ''; // Will be filtered out later if we want strict prefixes, but '*' usually means ALL
+              return p;
+          });
+
+      // If any pattern became empty string (meaning '*') or was originally '*', it implies "Scan All"
+      if (clean.includes('')) {
+          return [];
+      }
+
+      if (clean.length === 0) {
+          // Usually empty config means Scan All.
+          return [];
+      }
+
+      // 2. Sort to ensure parents come before children
+      clean.sort();
+
+      // 3. Remove duplicates and sub-packages
+      const result: string[] = [];
+      for (const p of clean) {
+          if (result.length === 0) {
+              result.push(p);
+              continue;
+          }
+          const last = result[result.length - 1];
+          // Check if 'p' is sub-package of 'last'
+          // e.g. last="com.test", p="com.test.demo" -> p starts with last + '.'
+          if (p === last || p.startsWith(last + '.')) {
+              continue;
+          }
+          result.push(p);
+      }
+      return result;
   }
 }
