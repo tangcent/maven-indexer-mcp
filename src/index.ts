@@ -30,7 +30,7 @@ indexer.index().then(() => {
 server.registerTool(
   "get_class_details",
   {
-    description: "Retrieve the source code for a class from the **local Maven/Gradle cache** (containing **internal company libraries**). This tool identifies the containing artifact and returns the source code. It prefers actual source files but will fall back to decompilation if necessary. **Use this primarily for internal company libraries** that are not present in the current workspace. **IMPORTANT: Even if the code compiles and imports work, the source code might not be in the current workspace (it comes from a compiled internal library).** Use this tool to see the actual implementation of those internal libraries. Supports batch queries.",
+    description: "Retrieve the source code for a class from the local Maven/Gradle cache (containing internal company libraries). This tool identifies the containing artifact and returns the source code. It prefers actual source files but will fall back to decompilation if necessary. Use this primarily for internal company libraries that are not present in the current workspace. IMPORTANT: Even if the code compiles and imports work, the source code might not be in the current workspace (it comes from a compiled internal library). Use this tool to see the actual implementation of those internal libraries. Supports batch queries.",
     inputSchema: z.object({
       className: z.string().optional().describe("Fully qualified class name"),
       classNames: z.array(z.string()).optional().describe("Batch class names"),
@@ -180,7 +180,7 @@ server.registerTool(
 server.registerTool(
   "search_artifacts",
   {
-    description: "Search for **internal company artifacts** and libraries in the local Maven repository and Gradle caches by coordinate (groupId, artifactId) or keyword. **Use this primarily for internal company packages** or to find available versions of internal projects that are locally built. Also supports searching third-party libraries in the local cache. Supports batch queries.",
+    description: "Search for internal company artifacts and libraries in the local Maven repository and Gradle caches by coordinate (groupId, artifactId) or keyword. Use this primarily for internal company packages or to find available versions of internal projects that are locally built. Also supports searching third-party libraries in the local cache. Supports batch queries.",
     inputSchema: z.object({
       query: z.string().optional().describe("Search query (groupId, artifactId, or keyword)"),
       queries: z.array(z.string()).optional().describe("Batch search queries"),
@@ -222,7 +222,7 @@ server.registerTool(
 server.registerTool(
   "search_classes",
   {
-    description: "Search for Java classes in **internal company libraries** found in the local Maven/Gradle caches. **Essential for finding classes in internal company libraries** that are not part of the current workspace source code. Use this when you see an import (e.g., 'com.company.util.Helper') but cannot find the definition. **Do not assume that because the code compiles or the import exists, the source is local.** It often comes from a compiled **internal library**. This tool helps locate the defining artifact. Supports batch queries.",
+    description: "Search for Java classes in internal company libraries found in the local Maven/Gradle caches. Essential for finding classes in internal company libraries that are not part of the current workspace source code. Use this when you see an import (e.g., 'com.company.util.Helper') but cannot find the definition. Do not assume that because the code compiles or the import exists, the source is local. It often comes from a compiled internal library. This tool helps locate the defining artifact. Supports batch queries.",
     inputSchema: z.object({
       className: z.string().optional().describe("Fully qualified class name, partial name, or keywords describing the class purpose (e.g. 'JsonToXml')."),
       classNames: z.array(z.string()).optional().describe("Batch class names"),
@@ -261,7 +261,7 @@ server.registerTool(
 server.registerTool(
   "search_implementations",
   {
-    description: "Search for **internal implementations** of an interface or base class. **This is particularly useful for finding implementations of SPIs or base classes within internal company libraries** in the local Maven/Gradle cache. Supports batch queries.",
+    description: "Search for internal implementations of an interface or base class. This is particularly useful for finding implementations of SPIs or base classes within internal company libraries in the local Maven/Gradle cache. Supports batch queries.",
     inputSchema: z.object({
       className: z.string().optional().describe("Fully qualified class name of the interface or base class (e.g. 'java.util.List')"),
       classNames: z.array(z.string()).optional().describe("Batch class names"),
