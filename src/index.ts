@@ -5,6 +5,7 @@ import path from 'path';
 import { z } from "zod";
 import { Indexer } from "./indexer.js";
 import { SourceParser } from "./source_parser.js";
+import { ArtifactResolver } from "./artifact_resolver.js";
 
 const server = new McpServer(
   {
@@ -68,19 +69,13 @@ server.registerTool(
               }
 
               // We have an exact match, choose the best artifact
-              // Strategy: 1. Prefer hasSource=true. 2. Prefer highest ID (likely newest).
-              const artifacts = exactMatch.artifacts.sort((a, b) => {
-                  if (a.hasSource !== b.hasSource) {
-                      return a.hasSource ? -1 : 1; // source comes first
-                  }
-                  return b.id - a.id; // higher ID comes first
-              });
+              const bestArtifact = await ArtifactResolver.resolveBestArtifact(exactMatch.artifacts);
 
-              if (artifacts.length === 0) {
+              if (!bestArtifact) {
                   return `Class '${clsName}' found but no artifacts are associated with it (database inconsistency).`;
               }
 
-              targetArtifact = artifacts[0];
+              targetArtifact = bestArtifact;
           }
 
           const artifact = targetArtifact;

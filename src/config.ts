@@ -6,6 +6,8 @@ import https from 'https';
 import xml2js from 'xml2js';
 import { fileURLToPath } from 'url';
 
+export type VersionStrategy = 'semver' | 'latest-published' | 'latest-used';
+
 export class Config {
   private static instance: Config;
   public localRepository: string = "";
@@ -14,6 +16,7 @@ export class Config {
   public includedPackages: string[] = ["*"];
   public normalizedIncludedPackages: string[] = [];
   public cfrPath: string | null = null;
+  public versionResolutionStrategy: VersionStrategy = 'semver';
 
   private constructor() {}
 
@@ -101,6 +104,22 @@ export class Config {
         const __filename = fileURLToPath(import.meta.url);
         const __dirname = path.dirname(__filename);
         this.cfrPath = path.resolve(__dirname, '../lib/cfr-0.152.jar');
+    }
+
+    if (process.env.VERSION_RESOLUTION_STRATEGY) {
+        const strategy = process.env.VERSION_RESOLUTION_STRATEGY.toLowerCase();
+        if (strategy === 'semver' || strategy === 'latest-published' || strategy === 'latest-used') {
+            this.versionResolutionStrategy = strategy as VersionStrategy;
+        } else if (strategy === 'semver-latest') {
+            // Backward compatibility
+            this.versionResolutionStrategy = 'semver';
+        } else if (strategy === 'date-latest' || strategy === 'modification-time' || strategy === 'publish-time') {
+            // Backward compatibility
+            this.versionResolutionStrategy = 'latest-published';
+        } else if (strategy === 'creation-time' || strategy === 'usage-time') {
+             // Backward compatibility
+            this.versionResolutionStrategy = 'latest-used';
+        }
     }
 
     if (this.cfrPath && !(await this.fileExists(this.cfrPath))) {

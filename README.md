@@ -139,6 +139,10 @@ the configuration:
   Default is `*` (index everything).
 * **`MAVEN_INDEXER_CFR_PATH`**: (Optional) Absolute path to a specific CFR decompiler JAR. If not provided, the server
   will attempt to use its bundled CFR version.
+* **`VERSION_RESOLUTION_STRATEGY`**: (Optional) Strategy to choose the version when multiple versions of an artifact are found and no specific coordinate is provided.
+  * `semver`: (Default) Prefer the highest semantic version (e.g. 1.2.0 > 1.1.9).
+  * `latest-published`: Prefer the version with the latest publish time (checks `*.pom.lastUpdated` first, then file modification time).
+  * `latest-used`: Prefer the version most recently imported/used by the user (based on file creation time).
 
 Example with optional configuration:
 
@@ -155,7 +159,8 @@ Example with optional configuration:
         "MAVEN_REPO": "/Users/yourname/.m2/repository",
         "GRADLE_REPO_PATH": "/Users/yourname/.gradle/caches/modules-2/files-2.1",
         "INCLUDED_PACKAGES": "com.mycompany.*",
-        "MAVEN_INDEXER_CFR_PATH": "/path/to/cfr-0.152.jar"
+        "MAVEN_INDEXER_CFR_PATH": "/path/to/cfr-0.152.jar",
+        "VERSION_RESOLUTION_STRATEGY": "semver"
       }
     }
   }
