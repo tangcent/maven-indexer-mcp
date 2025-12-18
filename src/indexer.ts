@@ -63,7 +63,12 @@ export class Indexer {
 
         console.error(`Starting file watcher on ${pathsToWatch.join(', ')}...`);
         this.watcher = chokidar.watch(pathsToWatch, {
-            ignored: /(^|[\/\\])\../, // ignore dotfiles
+            ignored: (p) => {
+                // Don't ignore the root paths themselves
+                if (pathsToWatch.includes(p)) return false;
+                // Ignore dotfiles/dotdirs
+                return path.basename(p).startsWith('.');
+            },
             persistent: true,
             ignoreInitial: true,
             depth: 10 // Limit depth to avoid too much overhead? Standard maven repo depth is around 3-5
