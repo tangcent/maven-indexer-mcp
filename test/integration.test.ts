@@ -81,6 +81,8 @@ describe('Maven Indexer Integration', () => {
         if (fs.existsSync(TEST_REPO_DIR)) fs.rmSync(TEST_REPO_DIR, { recursive: true, force: true });
         if (fs.existsSync(DB_FILE)) fs.unlinkSync(DB_FILE);
 
+        process.env.DB_FILE = DB_FILE;
+
         // Setup Repo
         createTestArtifact();
 
@@ -95,6 +97,7 @@ describe('Maven Indexer Integration', () => {
         // Cleanup
         if (fs.existsSync(TEST_REPO_DIR)) fs.rmSync(TEST_REPO_DIR, { recursive: true, force: true });
         if (fs.existsSync(DB_FILE)) fs.unlinkSync(DB_FILE);
+        delete process.env.DB_FILE;
     });
 
     it('should index the repository', async () => {

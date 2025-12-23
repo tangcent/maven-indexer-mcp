@@ -1,5 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
+import os from 'os';
+import fs from 'fs';
 
 export class DB {
   private static instance: DB;
@@ -7,9 +9,21 @@ export class DB {
 
   private constructor() {
     // Check environment variable for DB path (useful for testing)
-    const dbName = process.env.DB_FILE || 'maven-index.sqlite';
-    const dbPath = path.join(process.cwd(), dbName);
-    this.db = new Database(dbPath);
+    if (process.env.DB_FILE) {
+      this.db = new Database(process.env.DB_FILE);
+    } else {
+      // Use home directory for the database file
+      const homeDir = os.homedir();
+      const configDir = path.join(homeDir, '.maven-indexer-mcp');
+      
+      // Ensure the directory exists
+      if (!fs.existsSync(configDir)) {
+        fs.mkdirSync(configDir, { recursive: true });
+      }
+
+      const dbPath = path.join(configDir, 'maven-index.sqlite');
+      this.db = new Database(dbPath);
+    }
     this.initSchema();
   }
 
