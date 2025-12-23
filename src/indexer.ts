@@ -3,10 +3,10 @@ import fsSync from 'fs';
 import path from 'path';
 import yauzl from 'yauzl';
 import chokidar from 'chokidar';
-import {FSWatcher} from 'chokidar';
-import {Config} from './config.js';
-import {DB} from './db/index.js';
-import {ClassParser} from './class_parser.js';
+import { FSWatcher } from 'chokidar';
+import { Config } from './config.js';
+import { DB } from './db/index.js';
+import { ClassParser } from './class_parser.js';
 
 export interface Artifact {
     id: number;
@@ -26,6 +26,7 @@ export class Indexer {
     private isIndexing: boolean = false;
     private watcher: FSWatcher | null = null;
     private debounceTimer: NodeJS.Timeout | null = null;
+    private pollingTimer: NodeJS.Timeout | null = null;
 
     private constructor() {
     }
@@ -38,57 +39,111 @@ export class Indexer {
     }
 
     /**
-     * Starts watching the local repository for changes.
-     * Debounces changes to trigger re-indexing.
+     * Starts watching the local repository for changes - ULTRA SIMPLE VERSION
+     * Just watch the root directories without recursion
      */
     public async startWatch() {
         const config = await Config.getInstance();
-        const pathsToWatch: string[] = [];
+        const watchPaths = [];
 
+        // Simple: Just add the main repository paths
         if (config.localRepository && fsSync.existsSync(config.localRepository)) {
-            pathsToWatch.push(config.localRepository);
-        }
-        if (config.gradleRepository && fsSync.existsSync(config.gradleRepository)) {
-            pathsToWatch.push(config.gradleRepository);
+            watchPaths.push(config.localRepository);
         }
 
-        if (pathsToWatch.length === 0) {
+        if (config.gradleRepository && fsSync.existsSync(config.gradleRepository)) {
+            watchPaths.push(config.gradleRepository);
+        }
+
+        if (watchPaths.length === 0) {
             console.error("No repository paths found, skipping watch mode.");
             return;
         }
 
-        if (this.watcher) {
+        if (this.watcher || this.pollingTimer) {
             return;
         }
 
-        console.error(`Starting file watcher on ${pathsToWatch.join(', ')}...`);
-        this.watcher = chokidar.watch(pathsToWatch, {
-            ignored: (p) => {
-                // Don't ignore the root paths themselves
-                if (pathsToWatch.includes(p)) return false;
-                // Ignore dotfiles/dotdirs
-                return path.basename(p).startsWith('.');
-            },
-            persistent: true,
-            ignoreInitial: true,
-            depth: 10 // Limit depth to avoid too much overhead? Standard maven repo depth is around 3-5
-        });
+        console.error(`🔍 Starting ultra-simple file watcher on: ${watchPaths.join(', ')}`);
 
-        const onChange = () => {
-            if (this.debounceTimer) clearTimeout(this.debounceTimer);
-            this.debounceTimer = setTimeout(() => {
-                console.error("Repository change detected. Triggering re-index...");
-                this.index().catch(console.error);
-            }, 5000); // Debounce for 5 seconds
-        };
+        try {
+            // ULTRA SIMPLE: Watch only root directories, no recursion
+            this.watcher = chokidar.watch(watchPaths, {
+                // Watch only the root directory itself, not subdirectories
+                depth: 0,
 
-        this.watcher
-            .on('add', (path: string) => {
-                if (path.endsWith('.jar') || path.endsWith('.pom')) onChange();
-            })
-            .on('unlink', (path: string) => {
-                if (path.endsWith('.jar') || path.endsWith('.pom')) onChange();
+                // Don't trigger for files that already exist
+                ignoreInitial: true,
+
+                // Wait for files to finish writing before triggering
+                awaitWriteFinish: {
+                    stabilityThreshold: 2000,
+                    pollInterval: 100
+                },
+
+                // Don't crash on permission errors
+                ignorePermissionErrors: true
             });
+
+            // SIMPLE: Watch for any changes in the root directories
+            // This will catch when new directories are created (which means new artifacts)
+            this.watcher
+                .on('addDir', (dirPath) => {
+                    console.error(`� New directory detected: ${path.basename(dirPath)}`);
+                    this.triggerReindex();
+                })
+                .on('unlinkDir', (dirPath) => {
+                    console.error(`🗑️  Directory removed: ${path.basename(dirPath)}`);
+                    this.triggerReindex();
+                })
+                .on('error', (error: unknown) => {
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    console.error(`❌ Watcher error: ${errorMessage}`);
+                    this.fallbackToPolling();
+                });
+
+            console.error('✅ Ultra-simple file watcher started successfully');
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            console.error(`❌ Failed to start watcher: ${errorMessage}`);
+            this.fallbackToPolling();
+        }
+    }
+
+    /**
+     * Falls back to polling mode if watcher fails.
+     * Polls the repository every 1 min
+     */
+    private fallbackToPolling() {
+        if (this.pollingTimer) {
+            return;
+        }
+
+        console.error('⚠️ Falling back to polling mode (every 10s)...');
+
+        if (this.watcher) {
+            this.watcher.close().catch(err => console.error(`Error closing watcher: ${err}`));
+            this.watcher = null;
+        }
+
+        this.pollingTimer = setInterval(() => {
+            this.index().catch(console.error);
+        }, 60000);
+    }
+
+    /**
+     * Trigger reindexing with debouncing (wait a bit for multiple changes)
+     */
+    private triggerReindex() {
+        if (this.debounceTimer) {
+            clearTimeout(this.debounceTimer);
+        }
+
+        // Wait 3 seconds after the last change before reindexing
+        this.debounceTimer = setTimeout(() => {
+            console.error('🔄 Changes detected - triggering reindex...');
+            this.index().catch(console.error);
+        }, 3000);
     }
 
     /**
@@ -222,7 +277,7 @@ export class Indexer {
         const scanDir = async (dir: string) => {
             let entries;
             try {
-                entries = await fs.readdir(dir, {withFileTypes: true});
+                entries = await fs.readdir(dir, { withFileTypes: true });
             } catch (e) {
                 return;
             }
@@ -316,7 +371,7 @@ export class Indexer {
         // Helper to read directory safely
         const readDirSafe = async (p: string) => {
             try {
-                return await fs.readdir(p, {withFileTypes: true});
+                return await fs.readdir(p, { withFileTypes: true });
             } catch (e) {
                 return [];
             }
@@ -407,7 +462,7 @@ export class Indexer {
         }
 
         return new Promise((resolve) => {
-            yauzl.open(jarPath, {lazyEntries: true, autoClose: true}, (err, zipfile) => {
+            yauzl.open(jarPath, { lazyEntries: true, autoClose: true }, (err, zipfile) => {
                 if (err || !zipfile) {
                     // If we can't open it, maybe it's corrupt. Skip for now.
                     resolve();
