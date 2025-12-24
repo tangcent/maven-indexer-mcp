@@ -10,6 +10,35 @@ publish_npm() {
 
 publish_github() {
     echo "🚀 Publishing to GitHub Packages..."
+
+    # Check authentication before doing anything
+    if ! npm whoami --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+        echo "⚠️  You are not logged in to GitHub Packages."
+        echo "� To publish, you need a GitHub Personal Access Token (classic) with:"
+        echo "   ✅ write:packages"
+        echo "   ✅ read:packages"
+        echo ""
+        echo "🔗 Create one here: https://github.com/settings/tokens/new?scopes=write:packages,read:packages&description=Maven%20Indexer%20MCP%20Publish"
+        echo ""
+        echo "📝 Instructions:"
+        echo "   1. Click the link above to generate a token."
+        echo "   2. Copy the generated token (it starts with 'ghp_')."
+        echo "   3. When prompted below, use your GitHub username."
+        echo "   4. For the 'Password', PASTE the token you just copied."
+        echo ""
+        read -p "Would you like to log in now? [y/N] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo "👉 Please enter your GitHub username and use your PAT as the password."
+            if ! npm login --registry=https://npm.pkg.github.com; then
+                echo "❌ Login failed. Please try again or login manually."
+                exit 1
+            fi
+        else
+            echo "❌ Authentication required. Please run 'npm login --registry=https://npm.pkg.github.com' and try again."
+            exit 1
+        fi
+    fi
     
     # 1. Backup package.json
     cp package.json package.json.bak
