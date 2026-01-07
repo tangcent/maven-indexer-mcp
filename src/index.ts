@@ -25,6 +25,7 @@ const indexer = Indexer.getInstance();
 // We trigger indexing but don't await it so server can start
 indexer.index().then(() => {
     // Start watching for changes after initial index
+    indexer.startSchedule();
     return indexer.startWatch();
 }).catch(err => console.error("Initial indexing failed:", err));
 

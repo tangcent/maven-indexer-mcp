@@ -26,7 +26,7 @@ export class Indexer {
     private isIndexing: boolean = false;
     private watcher: FSWatcher | null = null;
     private debounceTimer: NodeJS.Timeout | null = null;
-    private pollingTimer: NodeJS.Timeout | null = null;
+    private scheduleTimer: NodeJS.Timeout | null = null;
 
     private constructor() {
     }
@@ -39,8 +39,7 @@ export class Indexer {
     }
 
     /**
-     * Starts watching the local repository for changes - ULTRA SIMPLE VERSION
-     * Just watch the root directories without recursion
+     * Starts watching the local repository for changes.
      */
     public async startWatch() {
         const config = await Config.getInstance();
@@ -60,75 +59,79 @@ export class Indexer {
             return;
         }
 
-        if (this.watcher || this.pollingTimer) {
+        if (this.watcher) {
             return;
         }
 
-        console.error(`🔍 Starting ultra-simple file watcher on: ${watchPaths.join(', ')}`);
+        console.error(`🔍 Starting file watcher on: ${watchPaths.join(', ')}`);
 
         try {
-            // ULTRA SIMPLE: Watch only root directories, no recursion
+            // Watch for .jar and .pom files changes deep in the repository
             this.watcher = chokidar.watch(watchPaths, {
-                // Watch only the root directory itself, not subdirectories
-                depth: 0,
-
-                // Don't trigger for files that already exist
+                // Watch for jar and pom files
+                ignored: [
+                    /(^|[\/\\])\../, // ignore dotfiles
+                    /node_modules/,
+                    /target/,
+                    /build/,
+                ],
+                persistent: true,
                 ignoreInitial: true,
-
-                // Wait for files to finish writing before triggering
                 awaitWriteFinish: {
                     stabilityThreshold: 2000,
                     pollInterval: 100
                 },
-
-                // Don't crash on permission errors
                 ignorePermissionErrors: true
             });
 
-            // SIMPLE: Watch for any changes in the root directories
-            // This will catch when new directories are created (which means new artifacts)
+            // Watch for file additions and changes
             this.watcher
+                .on('add', (filePath) => {
+                    if (filePath.endsWith('.jar') || filePath.endsWith('.pom')) {
+                        console.error(`📄 New file detected: ${path.basename(filePath)}`);
+                        this.triggerReindex();
+                    }
+                })
                 .on('addDir', (dirPath) => {
-                    console.error(`� New directory detected: ${path.basename(dirPath)}`);
+                    console.error(`📁 New directory detected: ${path.basename(dirPath)}`);
                     this.triggerReindex();
                 })
+                .on('unlink', (filePath) => {
+                    if (filePath.endsWith('.jar') || filePath.endsWith('.pom')) {
+                        console.error(`🗑️ File removed: ${path.basename(filePath)}`);
+                        this.triggerReindex();
+                    }
+                })
                 .on('unlinkDir', (dirPath) => {
-                    console.error(`🗑️  Directory removed: ${path.basename(dirPath)}`);
+                    console.error(`🗑️ Directory removed: ${path.basename(dirPath)}`);
                     this.triggerReindex();
                 })
                 .on('error', (error: unknown) => {
                     const errorMessage = error instanceof Error ? error.message : String(error);
                     console.error(`❌ Watcher error: ${errorMessage}`);
-                    this.fallbackToPolling();
                 });
 
-            console.error('✅ Ultra-simple file watcher started successfully');
+            console.error('✅ File watcher started successfully');
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             console.error(`❌ Failed to start watcher: ${errorMessage}`);
-            this.fallbackToPolling();
         }
     }
 
     /**
-     * Falls back to polling mode if watcher fails.
-     * Polls the repository every 1 min
+     * Starts a scheduled job to reindex every 1 hour.
      */
-    private fallbackToPolling() {
-        if (this.pollingTimer) {
+    public startSchedule() {
+        if (this.scheduleTimer) {
             return;
         }
 
-        console.error('⚠️ Falling back to polling mode (every 10s)...');
+        console.error('⏰ Starting scheduled reindex job (every 1 hour)...');
 
-        if (this.watcher) {
-            this.watcher.close().catch(err => console.error(`Error closing watcher: ${err}`));
-            this.watcher = null;
-        }
-
-        this.pollingTimer = setInterval(() => {
+        this.scheduleTimer = setInterval(() => {
+            console.error('⏰ Scheduled reindex triggered...');
             this.index().catch(console.error);
-        }, 60000);
+        }, 3600000); // 1 hour
     }
 
     /**
