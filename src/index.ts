@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import path from 'path';
 import { z } from "zod";
-import { Indexer } from "./indexer.js";
+import { Indexer, Artifact } from "./indexer.js";
 import { SourceParser } from "./source_parser.js";
 import { ArtifactResolver } from "./artifact_resolver.js";
 
@@ -175,9 +175,9 @@ server.registerTool(
 server.registerTool(
   "search_artifacts",
   {
-    description: "Search for internal company artifacts and libraries in the local Maven repository and Gradle caches by coordinate (groupId, artifactId) or keyword. Use this primarily for internal company packages or to find available versions of internal projects that are locally built. Also supports searching third-party libraries in the local cache. Supports batch queries.",
+    description: "Search for internal company artifacts and libraries in the local Maven repository and Gradle caches by coordinate (groupId, artifactId), keyword, or class name. Use this primarily for internal company packages or to find available versions of internal projects that are locally built. Also supports searching third-party libraries in the local cache. Supports batch queries.",
     inputSchema: z.object({
-      query: z.string().optional().describe("Search query (groupId, artifactId, or keyword)"),
+      query: z.string().optional().describe("Search query (groupId, artifactId, keyword, or class name)"),
       queries: z.array(z.string()).optional().describe("Batch search queries"),
     }),
   },
@@ -191,16 +191,37 @@ server.registerTool(
     }
 
     const results = allQueries.map(q => {
-        const matches = indexer.search(q);
+        let allMatches: Artifact[] = [];
+        let searchType = "artifact";
+        
+        // First try class search (for both simple and fully qualified class names)
+        const classSearchResults = indexer.searchClass(q);
+        if (classSearchResults.length > 0) {
+          // Extract unique artifacts from class search results
+          const artifactMap = new Map<string, Artifact>();
+          classSearchResults.forEach(result => {
+            result.artifacts.forEach(artifact => {
+              const key = `${artifact.groupId}:${artifact.artifactId}:${artifact.version}`;
+              if (!artifactMap.has(key)) {
+                artifactMap.set(key, artifact);
+              }
+            });
+          });
+          allMatches = Array.from(artifactMap.values());
+          searchType = "class";
+        } else {
+          // Fallback to artifact search if class search finds nothing
+          allMatches = indexer.search(q);
+        }
         
         // Limit results to avoid overflow
-        const limitedMatches = matches.slice(0, 20);
+        const limitedMatches = allMatches.slice(0, 20);
         
         const text = limitedMatches.length > 0
             ? limitedMatches.map(a => `${a.groupId}:${a.artifactId}:${a.version} (Has Source: ${a.hasSource})`).join("\n")
             : "No artifacts found matching the query.";
 
-        return `### Results for "${q}" (Found ${matches.length}${matches.length > 20 ? ', showing first 20' : ''}):\n${text}`;
+        return `### Results for "${q}" (Found ${allMatches.length} via ${searchType} search${allMatches.length > 20 ? ', showing first 20' : ''}):\n${text}`;
     });
 
     return {
