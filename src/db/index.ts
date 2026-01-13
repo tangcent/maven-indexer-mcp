@@ -73,6 +73,24 @@ export class DB {
       );
       
       CREATE INDEX IF NOT EXISTS idx_inheritance_parent ON inheritance(parent_class_name);
+
+      CREATE TABLE IF NOT EXISTS resources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        artifact_id INTEGER NOT NULL,
+        path TEXT NOT NULL,
+        content TEXT,
+        type TEXT
+      );
+      
+      CREATE INDEX IF NOT EXISTS idx_resources_artifact ON resources(artifact_id);
+
+      CREATE TABLE IF NOT EXISTS proto_classes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        resource_id INTEGER NOT NULL,
+        class_name TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_proto_classes_class ON proto_classes(class_name);
       
       -- Cleanup old table if exists
       DROP TABLE IF EXISTS indexed_artifacts;

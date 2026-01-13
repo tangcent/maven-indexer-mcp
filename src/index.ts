@@ -42,6 +42,12 @@ server.registerTool(
   },
   async ({ className, classNames, coordinate, type }) => {
       const resolveOne = async (clsName: string, coord?: string) => {
+          // Check if this is a proto-generated class first
+          const protoContent = indexer.getProtoContent(clsName);
+          if (protoContent) {
+               return `Class: ${clsName}\n(Generated from Proto file)\n\nProto Content:\n\`\`\`protobuf\n${protoContent}\n\`\`\``;
+          }
+
           let targetArtifact: import("./indexer.js").Artifact | undefined;
 
           if (coord) {
@@ -309,6 +315,27 @@ server.registerTool(
 
     return {
         content: [{ type: "text", text: results.join("\n\n") }]
+    };
+  }
+);
+
+server.registerTool(
+  "search_resources",
+  {
+    description: "Search for resources (non-class files) inside JARs, such as properties files, XML configs, or proto files.",
+    inputSchema: z.object({
+      pattern: z.string().describe("Partial path or filename pattern to search for (e.g. 'log4j.xml', '.proto')"),
+    }),
+  },
+  async ({ pattern }) => {
+    const matches = indexer.searchResources(pattern);
+    
+    const text = matches.length > 0
+        ? matches.map(m => `Resource: ${m.path}\n    Artifact: ${m.artifact.groupId}:${m.artifact.artifactId}:${m.artifact.version}`).join("\n\n")
+        : `No resources found matching '${pattern}'.`;
+
+    return {
+      content: [{ type: "text", text }]
     };
   }
 );
