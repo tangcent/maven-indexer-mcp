@@ -42,6 +42,7 @@ server.registerTool(
   },
   async ({ className, classNames, coordinate, type }) => {
       const resolveOne = async (clsName: string, coord?: string) => {
+
           let targetArtifact: import("./indexer.js").Artifact | undefined;
 
           if (coord) {
@@ -150,6 +151,16 @@ server.registerTool(
                   }
                   if (detail.signatures) {
                       resultText += "Methods:\n" + detail.signatures.join("\n") + "\n";
+                  }
+              }
+
+              // Append related resources if any
+              const resources = indexer.getResourcesForClass(clsName);
+              if (resources.length > 0) {
+                  resultText += "\n\n### Related Resources\n";
+                  for (const res of resources) {
+                      const lang = res.type === 'proto' ? 'protobuf' : res.type;
+                      resultText += `\n**${res.path}** (${res.type})\n\`\`\`${lang}\n${res.content}\n\`\`\`\n`;
                   }
               }
 
@@ -309,6 +320,27 @@ server.registerTool(
 
     return {
         content: [{ type: "text", text: results.join("\n\n") }]
+    };
+  }
+);
+
+server.registerTool(
+  "search_resources",
+  {
+    description: "Search for resources (non-class files) inside JARs, such as properties files, XML configs, or proto files.",
+    inputSchema: z.object({
+      pattern: z.string().describe("Partial path or filename pattern to search for (e.g. 'log4j.xml', '.proto')"),
+    }),
+  },
+  async ({ pattern }) => {
+    const matches = indexer.searchResources(pattern);
+    
+    const text = matches.length > 0
+        ? matches.map(m => `Resource: ${m.path}\n    Artifact: ${m.artifact.groupId}:${m.artifact.artifactId}:${m.artifact.version}`).join("\n\n")
+        : `No resources found matching '${pattern}'.`;
+
+    return {
+      content: [{ type: "text", text }]
     };
   }
 );

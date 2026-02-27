@@ -7,6 +7,7 @@ import { FSWatcher } from 'chokidar';
 import { Config } from './config.js';
 import { DB } from './db/index.js';
 import { ClassParser } from './class_parser.js';
+import { ProtoParser } from './proto_parser.js';
 
 export interface Artifact {
     id: number;
@@ -160,6 +161,8 @@ export class Indexer {
             db.prepare('UPDATE artifacts SET is_indexed = 0').run();
             db.prepare('DELETE FROM classes_fts').run();
             db.prepare('DELETE FROM inheritance').run();
+            db.prepare('DELETE FROM resources').run();
+            db.prepare('DELETE FROM resource_classes').run();
         });
         return this.index();
     }
@@ -468,15 +471,13 @@ export class Indexer {
         return new Promise((resolve) => {
             yauzl.open(jarPath, { lazyEntries: true, autoClose: true }, (err, zipfile) => {
                 if (err || !zipfile) {
-                    // If we can't open it, maybe it's corrupt. Skip for now.
                     resolve();
                     return;
                 }
 
                 const classes: string[] = [];
                 const inheritance: { className: string, parent: string, type: 'extends' | 'implements' }[] = [];
-
-                zipfile.readEntry();
+                const resources: { path: string, content: string, type: string, protoInfo?: any }[] = [];
 
                 zipfile.on('entry', (entry) => {
                     if (entry.fileName.endsWith('.class')) {
@@ -485,48 +486,57 @@ export class Indexer {
                                 zipfile.readEntry();
                                 return;
                             }
-
                             const chunks: Buffer[] = [];
                             readStream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
                             readStream.on('end', () => {
                                 const buffer = Buffer.concat(chunks);
                                 try {
                                     const info = ClassParser.parse(buffer);
-                                    // Simple check to avoid module-info or invalid names
                                     if (!info.className.includes('$') && info.className.length > 0) {
-                                        // Filter by includedPackages
                                         if (this.isPackageIncluded(info.className, config.normalizedIncludedPackages)) {
                                             classes.push(info.className);
-
                                             if (info.superClass && info.superClass !== 'java.lang.Object') {
-                                                inheritance.push({
-                                                    className: info.className,
-                                                    parent: info.superClass,
-                                                    type: 'extends'
-                                                });
+                                                inheritance.push({ className: info.className, parent: info.superClass, type: 'extends' });
                                             }
                                             for (const iface of info.interfaces) {
-                                                inheritance.push({
-                                                    className: info.className,
-                                                    parent: iface,
-                                                    type: 'implements'
-                                                });
+                                                inheritance.push({ className: info.className, parent: iface, type: 'implements' });
                                             }
                                         }
                                     }
-                                } catch (e) {
-                                    // console.error(`Failed to parse ${entry.fileName}`, e);
-                                }
+                                } catch (e) {}
                                 zipfile.readEntry();
                             });
                         });
+                    } else if (entry.fileName.endsWith('.proto')) {
+                         zipfile.openReadStream(entry, (err, readStream) => {
+                            if (err || !readStream) {
+                                zipfile.readEntry();
+                                return;
+                            }
+                            const chunks: Buffer[] = [];
+                            readStream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+                            readStream.on('end', () => {
+                                const content = Buffer.concat(chunks).toString('utf-8');
+                                try {
+                                    const protoInfo = ProtoParser.parse(content);
+                                    resources.push({
+                                        path: entry.fileName,
+                                        content: content,
+                                        type: 'proto',
+                                        protoInfo: protoInfo
+                                    });
+                                } catch (e) {
+                                    console.error(`Failed to parse proto ${entry.fileName}`, e);
+                                }
+                                zipfile.readEntry();
+                            });
+                         });
                     } else {
                         zipfile.readEntry();
                     }
                 });
 
                 zipfile.on('end', () => {
-                    // Batch insert classes
                     try {
                         db.transaction(() => {
                             const insertClass = db.prepare(`
@@ -537,6 +547,15 @@ export class Indexer {
                                 INSERT INTO inheritance (artifact_id, class_name, parent_class_name, type)
                                 VALUES (?, ?, ?, ?)
                             `);
+                            const insertResource = db.prepare(`
+                                INSERT INTO resources (artifact_id, path, content, type)
+                                VALUES (?, ?, ?, ?)
+                            `);
+                            const insertResourceClass = db.prepare(`
+                                INSERT INTO resource_classes (resource_id, class_name)
+                                VALUES (?, ?)
+                            `);
+                            const checkClassExists = db.prepare('SELECT 1 FROM classes_fts WHERE artifact_id = ? AND class_name = ?');
 
                             for (const cls of classes) {
                                 const simpleName = cls.split('.').pop() || cls;
@@ -547,7 +566,49 @@ export class Indexer {
                                 insertInheritance.run(artifact.id, item.className, item.parent, item.type);
                             }
 
-                            // Mark as indexed
+                            for (const res of resources) {
+                                const result = insertResource.run(artifact.id, res.path, res.content, res.type);
+                                const resourceId = result.lastInsertRowid;
+
+                                if (res.type === 'proto' && res.protoInfo) {
+                                    let packageName = res.protoInfo.javaPackage || res.protoInfo.package || '';
+                                    let outerClassName = res.protoInfo.javaOuterClassname;
+                                    
+                                    if (!outerClassName) {
+                                        const baseName = res.path.split('/').pop()?.replace('.proto', '') || '';
+                                        outerClassName = baseName.split('_').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
+                                    }
+
+                                    const classesToIndex: string[] = [];
+                                    const fullOuterClassName = packageName ? `${packageName}.${outerClassName}` : outerClassName;
+                                    classesToIndex.push(fullOuterClassName);
+
+                                    if (res.protoInfo.javaMultipleFiles) {
+                                        if (res.protoInfo.definitions) {
+                                            res.protoInfo.definitions.forEach((def: string) => {
+                                                const fullDefName = packageName ? `${packageName}.${def}` : def;
+                                                classesToIndex.push(fullDefName);
+                                            });
+                                        }
+                                    } else {
+                                        if (res.protoInfo.definitions) {
+                                            res.protoInfo.definitions.forEach((def: string) => {
+                                                const fullDefName = `${fullOuterClassName}.${def}`;
+                                                classesToIndex.push(fullDefName);
+                                            });
+                                        }
+                                    }
+                                    
+                                    for (const fullClassName of classesToIndex) {
+                                        insertResourceClass.run(resourceId, fullClassName);
+                                        const simpleName = fullClassName.split('.').pop() || fullClassName;
+                                        if (!checkClassExists.get(artifact.id, fullClassName)) {
+                                            insertClass.run(artifact.id, fullClassName, simpleName);
+                                        }
+                                    }
+                                }
+                            }
+
                             db.prepare('UPDATE artifacts SET is_indexed = 1 WHERE id = ?').run(artifact.id);
                         });
                     } catch (e) {
@@ -559,6 +620,7 @@ export class Indexer {
                 zipfile.on('error', () => {
                     resolve();
                 });
+                zipfile.readEntry();
             });
         });
     }
@@ -817,4 +879,56 @@ export class Indexer {
         }
         return undefined;
     }
+
+  /**
+   * Searches for resources matching the pattern.
+   */
+  public searchResources(pattern: string): { path: string, artifact: Artifact }[] {
+      const db = DB.getInstance();
+      try {
+          // LIKE search for now
+          const rows = db.prepare(`
+              SELECT r.path, a.id, a.group_id, a.artifact_id, a.version, a.abspath, a.has_source
+              FROM resources r
+              JOIN artifacts a ON r.artifact_id = a.id
+              WHERE r.path LIKE ?
+              LIMIT 100
+          `).all(`%${pattern}%`) as any[];
+
+          return rows.map(row => ({
+              path: row.path,
+              artifact: {
+                  id: row.id,
+                  groupId: row.group_id,
+                  artifactId: row.artifact_id,
+                  version: row.version,
+                  abspath: row.abspath,
+                  hasSource: Boolean(row.has_source)
+              }
+          }));
+      } catch (e) {
+          console.error("Search resources failed", e);
+          return [];
+      }
+  }
+
+  /**
+   * Retrieves resources associated with a given class name.
+   */
+  public getResourcesForClass(className: string): { path: string, content: string, type: string }[] {
+      const db = DB.getInstance();
+      try {
+          const rows = db.prepare(`
+              SELECT r.path, r.content, r.type
+              FROM resource_classes rc
+              JOIN resources r ON rc.resource_id = r.id
+              WHERE rc.class_name = ?
+          `).all(className) as { path: string, content: string, type: string }[];
+
+          return rows;
+      } catch (e) {
+          console.error("Get resources for class failed", e);
+          return [];
+      }
+  }
 }
