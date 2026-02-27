@@ -138,17 +138,17 @@ export class Indexer {
 
     /**
      * Trigger reindexing with debouncing (wait a bit for multiple changes)
+     * @param debounceSeconds - debounce delay in seconds (default: 3)
      */
-    private triggerReindex() {
+    public triggerReindex(debounceSeconds: number = 3) {
         if (this.debounceTimer) {
             clearTimeout(this.debounceTimer);
         }
 
-        // Wait 3 seconds after the last change before reindexing
         this.debounceTimer = setTimeout(() => {
             console.error('🔄 Changes detected - triggering reindex...');
             this.index().catch(console.error);
-        }, 3000);
+        }, debounceSeconds * 1000);
     }
 
     /**

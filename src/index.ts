@@ -67,6 +67,7 @@ server.registerTool(
                        const suggestions = matches.map(m => `- ${m.className}`).join("\n");
                        return `Class '${clsName}' not found exactly. Did you mean:\n${suggestions}`;
                    }
+                   indexer.triggerReindex(10);
                    return `Class '${clsName}' not found in the index. Try 'search_classes' with a keyword if you are unsure of the full name.`;
               }
 
