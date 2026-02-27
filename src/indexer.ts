@@ -66,15 +66,16 @@ export class Indexer {
         console.error(`🔍 Starting file watcher on: ${watchPaths.join(', ')}`);
 
         try {
-            // Watch for .jar and .pom files changes deep in the repository
-            this.watcher = chokidar.watch(watchPaths, {
-                // Watch for jar and pom files
-                ignored: [
-                    /(^|[\/\\])\../, // ignore dotfiles
-                    /node_modules/,
-                    /target/,
-                    /build/,
-                ],
+            // Use glob patterns to watch specific files
+            const toGlobPath = (p: string) => p.split(path.sep).join('/');
+            const watchPatterns = watchPaths.flatMap(p => [
+                `${toGlobPath(p)}/**/*.jar`,
+                `${toGlobPath(p)}/**/*.pom`
+            ]);
+
+            this.watcher = chokidar.watch(watchPatterns, {
+                // Ignore dotfiles and specific directories
+                ignored: /(^|[\/\\])\.|node_modules|target|build/,
                 persistent: true,
                 ignoreInitial: true,
                 awaitWriteFinish: {
