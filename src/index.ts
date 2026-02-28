@@ -272,8 +272,8 @@ server.registerTool(
         const text = matches.length > 0
             ? matches.map(m => {
                 // Group by artifact ID to allow easy selection
-                const artifacts = m.artifacts.slice(0, 5).map(a => `${a.groupId}:${a.artifactId}:${a.version}${a.hasSource ? ' (Has Source)' : ''}`).join("\n    ");
-                const more = m.artifacts.length > 5 ? `\n    ... (${m.artifacts.length - 5} more versions)` : '';
+                const artifacts = m.artifacts.slice(0, 3).map(a => `${a.groupId}:${a.artifactId}:${a.version}${a.hasSource ? ' (Has Source)' : ''}`).join("\n    ");
+                const more = m.artifacts.length > 3 ? `\n    ... (${m.artifacts.length - 3} more)` : '';
                 return `Class: ${m.className}\n    ${artifacts}${more}`;
             }).join("\n\n")
             : "No classes found matching the query. Try different keywords.";
@@ -310,8 +310,8 @@ server.registerTool(
 
         const text = matches.length > 0
             ? matches.map(m => {
-                const artifacts = m.artifacts.slice(0, 5).map(a => `${a.groupId}:${a.artifactId}:${a.version}`).join("\n    ");
-                const more = m.artifacts.length > 5 ? `\n    ... (${m.artifacts.length - 5} more versions)` : '';
+                const artifacts = m.artifacts.slice(0, 3).map(a => `${a.groupId}:${a.artifactId}:${a.version}`).join("\n    ");
+                const more = m.artifacts.length > 3 ? `\n    ... (${m.artifacts.length - 3} more)` : '';
                 return `Implementation: ${m.className}\n    ${artifacts}${more}`;
             }).join("\n\n")
             : `No implementations found for ${name}. Ensure the index is up to date and the class name is correct.`;

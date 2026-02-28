@@ -735,7 +735,7 @@ export class Indexer {
                 `).all(query) as any[];
             }
 
-            // Group by class name
+            // Group by class name, deduplicate by groupId:artifactId (keep first seen)
             const resultMap = new Map<string, Artifact[]>();
             for (const row of rows) {
                 const art: Artifact = {
@@ -750,7 +750,11 @@ export class Indexer {
                 if (!resultMap.has(row.class_name)) {
                     resultMap.set(row.class_name, []);
                 }
-                resultMap.get(row.class_name)!.push(art);
+                const artifacts = resultMap.get(row.class_name)!;
+                const key = `${art.groupId}:${art.artifactId}`;
+                if (!artifacts.some(a => `${a.groupId}:${a.artifactId}` === key)) {
+                    artifacts.push(art);
+                }
             }
 
             return Array.from(resultMap.entries()).map(([className, artifacts]) => ({
@@ -802,6 +806,7 @@ export class Indexer {
                 console.error(`Direct implementations check for ${className}: ${direct.c}`);
             }
 
+            // Group by class name, deduplicate by groupId:artifactId (keep first seen)
             const resultMap = new Map<string, Artifact[]>();
             for (const row of rows) {
                 const art: Artifact = {
@@ -816,7 +821,11 @@ export class Indexer {
                 if (!resultMap.has(row.class_name)) {
                     resultMap.set(row.class_name, []);
                 }
-                resultMap.get(row.class_name)!.push(art);
+                const artifacts = resultMap.get(row.class_name)!;
+                const key = `${art.groupId}:${art.artifactId}`;
+                if (!artifacts.some(a => `${a.groupId}:${a.artifactId}` === key)) {
+                    artifacts.push(art);
+                }
             }
 
             return Array.from(resultMap.entries()).map(([className, artifacts]) => ({
