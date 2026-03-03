@@ -934,10 +934,33 @@ export class Indexer {
               WHERE rc.class_name = ?
           `).all(className) as { path: string, content: string, type: string }[];
 
-          return rows;
+          // Deduplicate by content to avoid returning the same proto from many artifact versions
+          const seen = new Set<string>();
+          return rows.filter(row => {
+              if (seen.has(row.content)) return false;
+              seen.add(row.content);
+              return true;
+          });
       } catch (e) {
           console.error("Get resources for class failed", e);
           return [];
       }
   }
+
+  public getResourcesForClassInArtifact(className: string, artifactId: number): { path: string, content: string, type: string }[] {
+      const db = DB.getInstance();
+      try {
+          const rows = db.prepare(`
+              SELECT r.path, r.content, r.type
+              FROM resource_classes rc
+              JOIN resources r ON rc.resource_id = r.id
+              WHERE rc.class_name = ? AND r.artifact_id = ?
+          `).all(className, artifactId) as { path: string, content: string, type: string }[];
+          return rows;
+      } catch (e) {
+          console.error("Get resources for class in artifact failed", e);
+          return [];
+      }
+  }
+
 }
