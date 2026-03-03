@@ -44,6 +44,7 @@ server.registerTool(
       const resolveOne = async (clsName: string, coord?: string) => {
 
           let targetArtifact: import("./indexer.js").Artifact | undefined;
+          let resolvedClassName = clsName;
 
           if (coord) {
               const parts = coord.split(':');
@@ -62,23 +63,47 @@ server.registerTool(
               const exactMatch = matches.find(m => m.className === clsName);
               
               if (!exactMatch) {
-                   // If no exact match, but we have some results, list them
-                   if (matches.length > 0) {
-                       const suggestions = matches.map(m => `- ${m.className}`).join("\n");
-                       return `Class '${clsName}' not found exactly. Did you mean:\n${suggestions}`;
+                   // Try inner class resolution: com.pkg.Outer.Inner -> find com.pkg.Outer
+                   // Java inner classes use $ in bytecode but . in user-facing names
+                   const parts = clsName.split('.');
+                   let innerClassMatch: typeof matches[0] | undefined;
+                   for (let i = parts.length - 1; i > 0; i--) {
+                       const candidate = parts.slice(0, i).join('.');
+                       const candidateMatches = indexer.searchClass(candidate);
+                       const candidateExact = candidateMatches.find(m => m.className === candidate);
+                       if (candidateExact) {
+                           // Found the outer class, use $ notation for inner class
+                           const innerPart = parts.slice(i).join('$');
+                           resolvedClassName = candidate + '$' + innerPart;
+                           innerClassMatch = candidateExact;
+                           break;
+                       }
                    }
-                   indexer.triggerReindex(10);
-                   return `Class '${clsName}' not found in the index. Try 'search_classes' with a keyword if you are unsure of the full name.`;
+
+                   if (!innerClassMatch) {
+                       if (matches.length > 0) {
+                           const suggestions = matches.map(m => `- ${m.className}`).join("\n");
+                           return `Class '${clsName}' not found exactly. Did you mean:\n${suggestions}`;
+                       }
+                       indexer.triggerReindex(10);
+                       return `Class '${clsName}' not found in the index. Try 'search_classes' with a keyword if you are unsure of the full name.`;
+                   }
+                   // Use the outer class's artifact but decompile the inner class
+                   const bestArt = await ArtifactResolver.resolveBestArtifact(innerClassMatch.artifacts);
+                   if (!bestArt) {
+                       return `Class '${clsName}' found but no artifacts are associated with it.`;
+                   }
+                   targetArtifact = bestArt;
+              } else {
+                  // We have an exact match, choose the best artifact
+                  const bestArtifact = await ArtifactResolver.resolveBestArtifact(exactMatch.artifacts);
+
+                  if (!bestArtifact) {
+                      return `Class '${clsName}' found but no artifacts are associated with it (database inconsistency).`;
+                  }
+
+                  targetArtifact = bestArtifact;
               }
-
-              // We have an exact match, choose the best artifact
-              const bestArtifact = await ArtifactResolver.resolveBestArtifact(exactMatch.artifacts);
-
-              if (!bestArtifact) {
-                  return `Class '${clsName}' found but no artifacts are associated with it (database inconsistency).`;
-              }
-
-              targetArtifact = bestArtifact;
           }
 
           const artifact = targetArtifact;
@@ -92,7 +117,7 @@ server.registerTool(
               if (artifact.hasSource) {
                   const sourceJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}-sources.jar`);
                   try {
-                      detail = await SourceParser.getClassDetail(sourceJarPath, clsName, type);
+                      detail = await SourceParser.getClassDetail(sourceJarPath, resolvedClassName, type);
                   } catch (e: any) {
                       // Ignore error and fallthrough to main jar (decompilation)
                       lastError = e.message;
@@ -107,7 +132,7 @@ server.registerTool(
                  }
                  try {
                      // SourceParser will try to decompile if source file not found in jar
-                     detail = await SourceParser.getClassDetail(mainJarPath, clsName, type);
+                     detail = await SourceParser.getClassDetail(mainJarPath, resolvedClassName, type);
                      if (detail && detail.source) {
                          usedDecompilation = true;
                      }
@@ -123,43 +148,91 @@ server.registerTool(
                   mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
               }
               try {
-                  detail = await SourceParser.getClassDetail(mainJarPath, clsName, type);
+                  detail = await SourceParser.getClassDetail(mainJarPath, resolvedClassName, type);
               } catch (e: any) {
                   lastError = e.message;
               }
           }
           
           try {
-              if (!detail) {
+              // Check for proto resources in the SAME artifact only (no cross-artifact mixing)
+              // Try exact class name first, then walk up to find outer class
+              const getResourcesFromArtifact = (name: string) =>
+                  indexer.getResourcesForClassInArtifact(name, artifact.id);
+
+              let resources = getResourcesFromArtifact(clsName);
+              if (resources.length === 0) {
+                  // Walk up the class name to find outer class resources in same artifact
+                  const parts = clsName.split('.');
+                  for (let i = parts.length - 1; i > 0; i--) {
+                      const candidate = parts.slice(0, i).join('.');
+                      const candidateResources = getResourcesFromArtifact(candidate);
+                      if (candidateResources.length > 0) {
+                          resources = candidateResources;
+                          break;
+                      }
+                  }
+              }
+
+              // If no resources in the resolved artifact, search across all artifacts
+              // but only use resources (proto), not decompiled code from a different artifact
+              let crossArtifactResources: typeof resources = [];
+              if (resources.length === 0) {
+                  crossArtifactResources = indexer.getResourcesForClass(clsName);
+                  if (crossArtifactResources.length === 0) {
+                      const parts = clsName.split('.');
+                      for (let i = parts.length - 1; i > 0; i--) {
+                          const candidate = parts.slice(0, i).join('.');
+                          const found = indexer.getResourcesForClass(candidate);
+                          if (found.length > 0) {
+                              crossArtifactResources = found;
+                              break;
+                          }
+                      }
+                  }
+              }
+
+              const allResources = resources.length > 0 ? resources : crossArtifactResources;
+              const resourcesFromDifferentArtifact = resources.length === 0 && crossArtifactResources.length > 0;
+
+              if (!detail && allResources.length === 0) {
                   const debugInfo = `Artifact path: ${artifact.abspath}, hasSource: ${artifact.hasSource}`;
                   const errorMsg = lastError ? `\nLast error: ${lastError}` : "";
                   return `Class ${clsName} not found in artifact ${artifact.artifactId}. \nDebug info: ${debugInfo}${errorMsg}`;
               }
 
-              let resultText = `### Class: ${detail.className}\n`;
-              resultText += `Artifact: ${artifact.groupId}:${artifact.artifactId}:${artifact.version}\n\n`; // Inform user which artifact was used
-              
-              if (usedDecompilation) {
-                  resultText += "*Source code decompiled from binary class file.*\n\n";
-              }
-              
-              if (type === 'source') {
-                  const lang = detail.language || 'java';
-                  resultText += "```" + lang + "\n" + detail.source + "\n```";
-              } else {
-                  if (detail.doc) {
-                      resultText += "Documentation:\n" + detail.doc + "\n\n";
+              let resultText = '';
+
+              // Only show decompiled/source if resources come from the same artifact
+              // (avoid mixing compiled code from one artifact with proto from another)
+              if (detail && !resourcesFromDifferentArtifact) {
+                  resultText += `### Class: ${detail.className}\n`;
+                  resultText += `Artifact: ${artifact.groupId}:${artifact.artifactId}:${artifact.version}\n\n`;
+                  
+                  if (usedDecompilation) {
+                      resultText += "*Source code decompiled from binary class file.*\n\n";
                   }
-                  if (detail.signatures) {
-                      resultText += "Methods:\n" + detail.signatures.join("\n") + "\n";
+                  
+                  if (type === 'source') {
+                      const lang = detail.language || 'java';
+                      resultText += "```" + lang + "\n" + detail.source + "\n```";
+                  } else {
+                      if (detail.doc) {
+                          resultText += "Documentation:\n" + detail.doc + "\n\n";
+                      }
+                      if (detail.signatures) {
+                          resultText += "Methods:\n" + detail.signatures.join("\n") + "\n";
+                      }
                   }
+              } else if (!detail) {
+                  resultText += `### Class: ${clsName}\n`;
+                  resultText += `Artifact: ${artifact.groupId}:${artifact.artifactId}:${artifact.version}\n\n`;
               }
 
               // Append related resources if any
-              const resources = indexer.getResourcesForClass(clsName);
-              if (resources.length > 0) {
+              if (allResources.length > 0) {
                   resultText += "\n\n### Related Resources\n";
-                  for (const res of resources) {
+                  for (const res of allResources) {
                       const lang = res.type === 'proto' ? 'protobuf' : res.type;
                       resultText += `\n**${res.path}** (${res.type})\n\`\`\`${lang}\n${res.content}\n\`\`\`\n`;
                   }
