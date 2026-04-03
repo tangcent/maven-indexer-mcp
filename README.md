@@ -24,6 +24,14 @@ your private and obscure libraries.
 * **Source Code Retrieval**: Provides full source code if available.
 * **Real-time Monitoring**: Automatically updates the index when repositories change.
 
+## Maven Indexer MCP vs Maven Indexer CLI
+
+This package provides an MCP interface into the Maven/Gradle index. If you are using a **coding agent** in the terminal, you might benefit from using the [CLI + SKILL](https://github.com/tangcent/maven-indexer-cli) instead.
+
+- **CLI**: Modern **coding agents** increasingly favor CLI-based workflows exposed as SKILLs over MCP because CLI invocations are more token-efficient: they avoid loading large tool schemas into the model context, allowing agents to act through concise, purpose-built commands. This makes CLI + SKILLs better suited for high-throughput coding agents that must balance dependency lookups with large codebases and reasoning within limited context windows.<br>**Learn more about [Maven Indexer CLI with SKILLS](https://github.com/tangcent/maven-indexer-cli)**.
+
+- **MCP**: MCP remains the better choice for IDE-integrated agents (Cursor, Kiro, Windsurf, etc.) that benefit from persistent background indexing, automatic repository watching, and seamless tool invocation without any CLI setup. The MCP server indexes your repository in the background and keeps the index up to date automatically.
+
 ## Getting Started
 
 Add the following config to your MCP client:
