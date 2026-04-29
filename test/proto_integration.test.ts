@@ -45,10 +45,8 @@ message TestMessage {
 
         // Create JAR with proto file
         const jarPath = path.join(artifactDir, 'my-proto-1.0.0.jar');
-        // cd to TEST_DIR to zip relative path 'test.proto'
-        execSync(`zip ${jarPath} test.proto`, { cwd: TEST_DIR });
+        execSync(`jar -cf ${jarPath} -C ${TEST_DIR} test.proto`);
 
-        // Create POM
         const pomPath = path.join(artifactDir, 'my-proto-1.0.0.pom');
         fs.writeFileSync(pomPath, '<project><groupId>com.example</groupId><artifactId>my-proto</artifactId><version>1.0.0</version></project>');
 
@@ -58,7 +56,8 @@ message TestMessage {
     });
 
     afterAll(() => {
-        // Cleanup
+        DB.reset();
+        Config.reset();
         if (fs.existsSync(TEST_DIR)) {
             fs.rmSync(TEST_DIR, { recursive: true, force: true });
         }

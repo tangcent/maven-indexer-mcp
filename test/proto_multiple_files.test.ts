@@ -5,6 +5,7 @@ import path from 'path';
 import { execSync } from 'child_process';
 import { Indexer } from '../src/indexer.js';
 import { Config } from '../src/config.js';
+import { DB } from '../src/db/index.js';
 
 const TEST_DIR = path.resolve(__dirname, '../test_temp_proto_multi');
 const REPO_DIR = path.join(TEST_DIR, 'repo');
@@ -49,9 +50,8 @@ enum MultiEnum {
 
         // Create JAR
         const jarPath = path.join(artifactDir, 'multi-proto-1.0.0.jar');
-        execSync(`zip ${jarPath} multi.proto`, { cwd: TEST_DIR });
+        execSync(`jar -cf ${jarPath} -C ${TEST_DIR} multi.proto`);
 
-        // Create POM
         const pomPath = path.join(artifactDir, 'multi-proto-1.0.0.pom');
         fs.writeFileSync(pomPath, '<project><groupId>com.example</groupId><artifactId>multi-proto</artifactId><version>1.0.0</version></project>');
 
@@ -61,6 +61,8 @@ enum MultiEnum {
     });
 
     afterAll(() => {
+        DB.reset();
+        Config.reset();
         if (fs.existsSync(TEST_DIR)) {
             fs.rmSync(TEST_DIR, { recursive: true, force: true });
         }

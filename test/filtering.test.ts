@@ -4,7 +4,7 @@ import fs from 'fs';
 import {execSync} from 'child_process';
 import {Indexer} from '../src/indexer';
 import {Config} from '../src/config';
-import Database from 'better-sqlite3';
+import {DB} from '../src/db/index';
 
 const TEST_REPO_DIR = path.resolve('test-repo-filtering');
 const TEST_GRADLE_DIR = path.resolve('test-gradle-repo-filtering');
@@ -102,12 +102,11 @@ describe('Maven Indexer Filtering', () => {
     });
 
     afterAll(() => {
-        // Cleanup
+        DB.reset();
         if (fs.existsSync(TEST_REPO_DIR)) fs.rmSync(TEST_REPO_DIR, {recursive: true, force: true});
         if (fs.existsSync(TEST_GRADLE_DIR)) fs.rmSync(TEST_GRADLE_DIR, {recursive: true, force: true});
         if (fs.existsSync(DB_FILE)) fs.unlinkSync(DB_FILE);
 
-        // Reset env
         delete process.env.INCLUDED_PACKAGES;
         Config.reset();
     });

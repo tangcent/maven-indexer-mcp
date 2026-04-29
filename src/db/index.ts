@@ -151,4 +151,18 @@ export class DB {
   public transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
   }
+
+  public close() {
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+  }
+
+  public static reset() {
+    if (DB.instance) {
+      DB.instance.close();
+      DB.instance = undefined as any;
+    }
+  }
 }

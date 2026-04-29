@@ -3,6 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
+import { DB } from '../src/db/index';
 
 const TEST_REPO_DIR = path.resolve('test-repo-e2e');
 const DB_FILE = 'maven-index-e2e.sqlite';
@@ -82,7 +83,7 @@ describe('MCP Server E2E', () => {
 
     afterAll(() => {
         if (server) server.kill();
-        // Cleanup
+        DB.reset();
         if (fs.existsSync(TEST_REPO_DIR)) fs.rmSync(TEST_REPO_DIR, { recursive: true, force: true });
         if (fs.existsSync(DB_FILE)) fs.unlinkSync(DB_FILE);
     });
