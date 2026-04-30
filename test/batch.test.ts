@@ -67,11 +67,20 @@ describe('MCP Server Batch Queries', () => {
         createTestArtifact('batch-lib-2', 'BatchClass2');
     });
 
-    afterAll(() => {
-        if (server) server.kill();
+    afterAll(async () => {
+        if (server) {
+            server.kill();
+            await new Promise<void>(resolve => {
+                if (server.killed) { resolve(); return; }
+                server.on('exit', () => resolve());
+                setTimeout(() => resolve(), 5000);
+            });
+        }
         DB.reset();
         if (fs.existsSync(TEST_REPO_DIR)) fs.rmSync(TEST_REPO_DIR, { recursive: true, force: true });
-        if (fs.existsSync(DB_FILE)) fs.unlinkSync(DB_FILE);
+        if (fs.existsSync(DB_FILE)) {
+            try { fs.unlinkSync(DB_FILE); } catch { }
+        }
     });
 
     function sendRequest(method: string, params: any): Promise<any> {
