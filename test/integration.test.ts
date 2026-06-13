@@ -4,7 +4,7 @@ import fs from 'fs';
 import { execSync } from 'child_process';
 import { Indexer } from '../src/indexer';
 import { Config } from '../src/config';
-import Database from 'better-sqlite3';
+import { DB } from '../src/db/index';
 
 const TEST_REPO_DIR = path.resolve('test-repo-integration');
 const DB_FILE = 'maven-index.sqlite';
@@ -90,7 +90,8 @@ describe('Maven Indexer Integration', () => {
     });
 
     afterAll(() => {
-        // Cleanup
+        DB.reset();
+        Config.reset();
         if (fs.existsSync(TEST_REPO_DIR)) fs.rmSync(TEST_REPO_DIR, { recursive: true, force: true });
         if (fs.existsSync(DB_FILE)) fs.unlinkSync(DB_FILE);
         delete process.env.DB_FILE;
@@ -100,11 +101,9 @@ describe('Maven Indexer Integration', () => {
         const indexer = Indexer.getInstance();
         await indexer.index();
 
-        // Check DB
-        const db = new Database(DB_FILE);
+        const db = DB.getInstance().getDb();
         const count = db.prepare('SELECT count(*) as c FROM artifacts').get() as {c: number};
         expect(count.c).toBe(2);
-        db.close();
     });
 
     it('should find the class by name', async () => {
@@ -180,12 +179,10 @@ class KotlinUtils {
         `;
         fs.writeFileSync(path.join(ktPkgDir, 'KotlinUtils.kt'), ktContent);
         
-        // Create zip
-        // cd ktSrcDir && zip -r ktSourceJar .
         try {
-             execSync(`cd "${ktSrcDir}" && zip -r "${ktSourceJar}" .`);
+             execSync(`jar -cf "${ktSourceJar}" -C "${ktSrcDir}" .`);
         } catch (e) {
-            console.warn("zip command failed, skipping kotlin test");
+            console.warn("jar command failed, skipping kotlin test");
             return;
         }
         

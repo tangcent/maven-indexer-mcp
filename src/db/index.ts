@@ -1,22 +1,34 @@
-import Database from 'better-sqlite3';
+import { createRequire } from 'node:module';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
 
+const require = createRequire(import.meta.url);
+
+let Database: any = null;
+let dbLoadError: string | null = null;
+
+try {
+  Database = require('better-sqlite3');
+} catch (e: any) {
+  dbLoadError = e?.message || String(e);
+}
+
 export class DB {
   private static instance: DB;
-  private db: Database.Database;
+  private db: any;
 
   private constructor() {
-    // Check environment variable for DB path (useful for testing)
+    if (!Database) {
+      throw new Error(dbLoadError || 'better-sqlite3 failed to load');
+    }
+
     if (process.env.DB_FILE) {
       this.db = new Database(process.env.DB_FILE);
     } else {
-      // Use home directory for the database file
       const homeDir = os.homedir();
       const configDir = path.join(homeDir, '.maven-indexer-mcp');
       
-      // Ensure the directory exists
       if (!fs.existsSync(configDir)) {
         fs.mkdirSync(configDir, { recursive: true });
       }
@@ -25,6 +37,28 @@ export class DB {
       this.db = new Database(dbPath);
     }
     this.initSchema();
+  }
+
+  public static isAvailable(): boolean {
+    return Database !== null;
+  }
+
+  public static getLoadError(): string | null {
+    return dbLoadError;
+  }
+
+  public static checkHealth(): string | null {
+    if (!Database) {
+      return dbLoadError || 'better-sqlite3 failed to load';
+    }
+    try {
+      const testDb = new Database(':memory:');
+      testDb.exec('CREATE VIRTUAL TABLE IF NOT EXISTS _health_fts USING fts5(x, tokenize="trigram")');
+      testDb.close();
+    } catch (e: any) {
+      return e?.message || String(e);
+    }
+    return null;
   }
 
   public static getInstance(): DB {
@@ -36,10 +70,10 @@ export class DB {
 
   private initSchema() {
     // Register REGEXP function
-    this.db.function('regexp', { deterministic: true }, (regex, text) => {
+    this.db.function('regexp', { deterministic: true }, (regex: string, text: string) => {
         if (!regex || !text) return 0;
         try {
-            return new RegExp(regex as string).test(text as string) ? 1 : 0;
+            return new RegExp(regex).test(text) ? 1 : 0;
         } catch (e) {
             return 0;
         }
@@ -106,15 +140,29 @@ export class DB {
     }
   }
 
-  public getDb(): Database.Database {
+  public getDb() {
     return this.db;
   }
 
-  public prepare(sql: string): Database.Statement {
+  public prepare(sql: string) {
     return this.db.prepare(sql);
   }
 
   public transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  public close() {
+    if (this.db) {
+      this.db.close();
+      this.db = null;
+    }
+  }
+
+  public static reset() {
+    if (DB.instance) {
+      DB.instance.close();
+      DB.instance = undefined as any;
+    }
   }
 }

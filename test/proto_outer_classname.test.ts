@@ -5,6 +5,7 @@ import { execSync } from 'child_process';
 import { Indexer } from '../src/indexer.js';
 import { Config } from '../src/config.js';
 import { ProtoParser } from '../src/proto_parser.js';
+import { DB } from '../src/db/index.js';
 
 const TEST_DIR = path.resolve(__dirname, '../test_temp_proto_outer');
 const REPO_DIR = path.join(TEST_DIR, 'repo');
@@ -56,7 +57,7 @@ describe('Proto java_outer_classname (no multiple_files) Integration Test', () =
         const artifactDir = path.join(REPO_DIR, 'com', 'tangcent', 'event-sdk', '1.0.0');
         fs.mkdirSync(artifactDir, { recursive: true });
         const jarPath = path.join(artifactDir, 'event-sdk-1.0.0.jar');
-        execSync(`zip ${jarPath} base_event.proto`, { cwd: TEST_DIR });
+        execSync(`jar -cf ${jarPath} -C ${TEST_DIR} base_event.proto`);
         fs.writeFileSync(
             path.join(artifactDir, 'event-sdk-1.0.0.pom'),
             '<project><groupId>com.tangcent</groupId><artifactId>event-sdk</artifactId><version>1.0.0</version></project>'
@@ -66,7 +67,7 @@ describe('Proto java_outer_classname (no multiple_files) Integration Test', () =
         const artifactDir2 = path.join(REPO_DIR, 'com', 'tangcent', 'event-sdk', '2.0.0');
         fs.mkdirSync(artifactDir2, { recursive: true });
         const jarPath2 = path.join(artifactDir2, 'event-sdk-2.0.0.jar');
-        execSync(`zip ${jarPath2} base_event.proto`, { cwd: TEST_DIR });
+        execSync(`jar -cf ${jarPath2} -C ${TEST_DIR} base_event.proto`);
         fs.writeFileSync(
             path.join(artifactDir2, 'event-sdk-2.0.0.pom'),
             '<project><groupId>com.tangcent</groupId><artifactId>event-sdk</artifactId><version>2.0.0</version></project>'
@@ -77,7 +78,7 @@ describe('Proto java_outer_classname (no multiple_files) Integration Test', () =
         const consumerDir = path.join(REPO_DIR, 'com', 'tangcent', 'event-consumer', '1.0.0');
         fs.mkdirSync(consumerDir, { recursive: true });
         // Empty jar (no proto, no classes — just simulates a jar without proto)
-        execSync(`zip ${path.join(consumerDir, 'event-consumer-1.0.0.jar')} base_event.proto`, { cwd: TEST_DIR });
+        execSync(`jar -cf ${path.join(consumerDir, 'event-consumer-1.0.0.jar')} -C ${TEST_DIR} base_event.proto`);
         fs.writeFileSync(
             path.join(consumerDir, 'event-consumer-1.0.0.pom'),
             '<project><groupId>com.tangcent</groupId><artifactId>event-consumer</artifactId><version>1.0.0</version></project>'
@@ -88,6 +89,8 @@ describe('Proto java_outer_classname (no multiple_files) Integration Test', () =
     });
 
     afterAll(() => {
+        DB.reset();
+        Config.reset();
         if (fs.existsSync(TEST_DIR)) {
             fs.rmSync(TEST_DIR, { recursive: true, force: true });
         }

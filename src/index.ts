@@ -6,6 +6,41 @@ import { z } from "zod";
 import { Indexer, Artifact } from "./indexer.js";
 import { SourceParser } from "./source_parser.js";
 import { ArtifactResolver } from "./artifact_resolver.js";
+import { DB } from "./db/index.js";
+
+const healthError = DB.checkHealth();
+if (healthError) {
+  console.error(`
+================================================================================
+ERROR: Failed to initialize the database engine (better-sqlite3).
+
+This is most likely because the prebuilt binary is not available for your
+platform/Node.js version and the native compilation also failed.
+
+The original error was:
+  ${healthError}
+
+To fix this on Windows:
+  1. Install Visual Studio Build Tools with the "Desktop development with C++"
+     workload from https://visualstudio.microsoft.com/visual-cpp-build-tools/
+  2. Or run the following as Administrator:
+       npm install -g windows-build-tools
+  3. Then retry: npx -y maven-indexer-mcp
+
+To fix this on Linux/macOS:
+  1. Ensure build tools are installed (gcc, g++, make, python3)
+  2. On Debian/Ubuntu: sudo apt-get install build-essential python3
+  3. Then retry: npx -y maven-indexer-mcp
+
+For more information, see:
+  https://github.com/WiseLibs/better-sqlite3/blob/master/docs/compilation.md
+
+If you believe this is a bug, please report it at:
+  https://github.com/tangcent/maven-indexer-mcp/issues
+================================================================================
+`);
+  process.exit(1);
+}
 
 const server = new McpServer(
   {

@@ -4,6 +4,7 @@ import fs from 'fs';
 import { execSync } from 'child_process';
 import { Indexer } from '../src/indexer';
 import { Config } from '../src/config';
+import { DB } from '../src/db/index';
 
 const TEST_GRADLE_REPO = path.resolve('test-repo-gradle');
 const DB_FILE = 'maven-index-gradle.sqlite';
@@ -73,6 +74,8 @@ describe('Gradle Indexer Integration', () => {
     });
 
     afterAll(() => {
+        DB.reset();
+        Config.reset();
         if (fs.existsSync(TEST_GRADLE_REPO)) fs.rmSync(TEST_GRADLE_REPO, { recursive: true, force: true });
         if (fs.existsSync(DB_FILE)) fs.unlinkSync(DB_FILE);
         delete process.env.DB_FILE;
