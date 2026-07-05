@@ -3,6 +3,20 @@ export interface ClassInfo {
     className: string;
     superClass?: string;
     interfaces: string[];
+    methods?: string[];
+}
+
+/** Thrown when the constant pool contains an unrecognized tag. */
+export class UnknownTagError extends Error {
+    public readonly tag: number;
+    public readonly offset: number;
+
+    constructor(tag: number, offset: number) {
+        super(`Unknown constant pool tag: ${tag} at offset ${offset}`);
+        this.name = 'UnknownTagError';
+        this.tag = tag;
+        this.offset = offset;
+    }
 }
 
 export class ClassParser {
@@ -84,7 +98,7 @@ export class ClassParser {
                     this.offset += 2;
                     break;
                 default:
-                    throw new Error(`Unknown constant pool tag: ${tag} at offset ${this.offset - 1}`);
+                    throw new UnknownTagError(tag, this.offset - 1);
             }
         }
 
@@ -103,11 +117,53 @@ export class ClassParser {
             interfaces.push(this.resolveClass(interfaceIndex));
         }
 
+        // Skip fields (must advance offset to reach methods).
+        const fieldsCount = this.readU2();
+        for (let i = 0; i < fieldsCount; i++) {
+            this.readU2(); // access_flags
+            this.readU2(); // name_index
+            this.readU2(); // descriptor_index
+            const attributesCount = this.readU2();
+            for (let j = 0; j < attributesCount; j++) {
+                this.readU2(); // attribute_name_index
+                const attributeLength = this.readU4();
+                this.offset += attributeLength;
+            }
+        }
+
+        // Read methods and collect their names.
+        const methodsCount = this.readU2();
+        const methods: string[] = [];
+        for (let i = 0; i < methodsCount; i++) {
+            this.readU2(); // access_flags
+            const nameIndex = this.readU2();
+            this.readU2(); // descriptor_index
+            const attributesCount = this.readU2();
+            for (let j = 0; j < attributesCount; j++) {
+                this.readU2(); // attribute_name_index
+                const attributeLength = this.readU4();
+                this.offset += attributeLength;
+            }
+            const name = this.getUtf8(nameIndex);
+            if (name && name !== '<init>' && name !== '<clinit>') {
+                methods.push(name);
+            }
+        }
+
         return {
             className: className.replace(/\//g, '.'),
             superClass: superClass ? superClass.replace(/\//g, '.') : undefined,
-            interfaces: interfaces.map(i => i.replace(/\//g, '.'))
+            interfaces: interfaces.map(i => i.replace(/\//g, '.')),
+            methods,
         };
+    }
+
+    private getUtf8(index: number): string | undefined {
+        const entry = this.constantPool[index];
+        if (!entry || entry.tag !== 1) {
+            return undefined;
+        }
+        return entry.value;
     }
 
     private resolveClass(index: number): string {

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import path from 'path';
 import { z } from "zod";
-import { Indexer, Artifact } from "./indexer.js";
+import { Indexer, Artifact, ArtifactInfo, IndexStats } from "./indexer.js";
 import { SourceParser } from "./source_parser.js";
 import { ArtifactResolver } from "./artifact_resolver.js";
+import { resolveMainJar, resolveSourcesJar } from "./path_helpers.js";
 import { DB } from "./db/index.js";
 
 const healthError = DB.checkHealth();
@@ -76,7 +76,7 @@ server.registerTool(
     }),
   },
   async ({ className, classNames, coordinate, type }) => {
-      const resolveOne = async (clsName: string, coord?: string) => {
+      const resolveOne = async (clsName: string, coord?: string): Promise<{ text: string; isError?: boolean }> => {
 
           let targetArtifact: import("./indexer.js").Artifact | undefined;
           let resolvedClassName = clsName;
@@ -86,17 +86,17 @@ server.registerTool(
               if (parts.length === 3) {
                  targetArtifact = indexer.getArtifactByCoordinate(parts[0], parts[1], parts[2]);
               } else {
-                 return "Invalid coordinate format. Expected groupId:artifactId:version";
+                 return { text: "Invalid coordinate format. Expected groupId:artifactId:version", isError: true };
               }
               if (!targetArtifact) {
-                  return `Artifact ${coord} not found in index.`;
+                  return { text: `Artifact ${coord} not found in index.`, isError: true };
               }
           } else {
               // Auto-resolve artifact if coordinate is missing
               const matches = indexer.searchClass(clsName);
               // Find exact match for class name
               const exactMatch = matches.find(m => m.className === clsName);
-              
+
               if (!exactMatch) {
                    // Try inner class resolution: com.pkg.Outer.Inner -> find com.pkg.Outer
                    // Java inner classes use $ in bytecode but . in user-facing names
@@ -118,15 +118,14 @@ server.registerTool(
                    if (!innerClassMatch) {
                        if (matches.length > 0) {
                            const suggestions = matches.map(m => `- ${m.className}`).join("\n");
-                           return `Class '${clsName}' not found exactly. Did you mean:\n${suggestions}`;
+                           return { text: `Class '${clsName}' not found exactly. Did you mean:\n${suggestions}`, isError: true };
                        }
-                       indexer.triggerReindex(10);
-                       return `Class '${clsName}' not found in the index. Try 'search_classes' with a keyword if you are unsure of the full name.`;
+                       return { text: `Class '${clsName}' not found in the index. Try 'search_classes' with a keyword if you are unsure of the full name.`, isError: true };
                    }
                    // Use the outer class's artifact but decompile the inner class
                    const bestArt = await ArtifactResolver.resolveBestArtifact(innerClassMatch.artifacts);
                    if (!bestArt) {
-                       return `Class '${clsName}' found but no artifacts are associated with it.`;
+                       return { text: `Class '${clsName}' found but no artifacts are associated with it.`, isError: true };
                    }
                    targetArtifact = bestArt;
               } else {
@@ -134,7 +133,7 @@ server.registerTool(
                   const bestArtifact = await ArtifactResolver.resolveBestArtifact(exactMatch.artifacts);
 
                   if (!bestArtifact) {
-                      return `Class '${clsName}' found but no artifacts are associated with it (database inconsistency).`;
+                      return { text: `Class '${clsName}' found but no artifacts are associated with it (database inconsistency).`, isError: true };
                   }
 
                   targetArtifact = bestArtifact;
@@ -150,7 +149,7 @@ server.registerTool(
           // 1. If requesting source/docs, try Source JAR first
           if (type === 'source' || type === 'docs') {
               if (artifact.hasSource) {
-                  const sourceJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}-sources.jar`);
+                  const sourceJarPath = resolveSourcesJar(artifact);
                   try {
                       detail = await SourceParser.getClassDetail(sourceJarPath, resolvedClassName, type);
                   } catch (e: any) {
@@ -158,13 +157,10 @@ server.registerTool(
                       lastError = e.message;
                   }
               }
-              
+
               // If not found in source jar (or no source jar), try main jar (decompilation)
               if (!detail) {
-                 let mainJarPath = artifact.abspath;
-                 if (!mainJarPath.endsWith('.jar')) {
-                     mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
-                 }
+                 const mainJarPath = resolveMainJar(artifact);
                  try {
                      // SourceParser will try to decompile if source file not found in jar
                      detail = await SourceParser.getClassDetail(mainJarPath, resolvedClassName, type);
@@ -178,17 +174,14 @@ server.registerTool(
               }
           } else {
               // Signatures -> Use Main JAR
-              let mainJarPath = artifact.abspath;
-              if (!mainJarPath.endsWith('.jar')) {
-                  mainJarPath = path.join(artifact.abspath, `${artifact.artifactId}-${artifact.version}.jar`);
-              }
+              const mainJarPath = resolveMainJar(artifact);
               try {
                   detail = await SourceParser.getClassDetail(mainJarPath, resolvedClassName, type);
               } catch (e: any) {
                   lastError = e.message;
               }
           }
-          
+
           try {
               // Check for proto resources in the SAME artifact only (no cross-artifact mixing)
               // Try exact class name first, then walk up to find outer class
@@ -233,7 +226,7 @@ server.registerTool(
               if (!detail && allResources.length === 0) {
                   const debugInfo = `Artifact path: ${artifact.abspath}, hasSource: ${artifact.hasSource}`;
                   const errorMsg = lastError ? `\nLast error: ${lastError}` : "";
-                  return `Class ${clsName} not found in artifact ${artifact.artifactId}. \nDebug info: ${debugInfo}${errorMsg}`;
+                  return { text: `Class ${clsName} not found in artifact ${artifact.artifactId}. \nDebug info: ${debugInfo}${errorMsg}`, isError: true };
               }
 
               let resultText = '';
@@ -243,11 +236,11 @@ server.registerTool(
               if (detail && !resourcesFromDifferentArtifact) {
                   resultText += `### Class: ${detail.className}\n`;
                   resultText += `Artifact: ${artifact.groupId}:${artifact.artifactId}:${artifact.version}\n\n`;
-                  
+
                   if (usedDecompilation) {
                       resultText += "*Source code decompiled from binary class file.*\n\n";
                   }
-                  
+
                   if (type === 'source') {
                       const lang = detail.language || 'java';
                       resultText += "```" + lang + "\n" + detail.source + "\n```";
@@ -273,9 +266,9 @@ server.registerTool(
                   }
               }
 
-              return resultText;
+              return { text: resultText };
           } catch (e: any) {
-              return `Error reading source: ${e.message}`;
+              return { text: `Error reading source: ${e.message}`, isError: true };
           }
       };
 
@@ -284,12 +277,17 @@ server.registerTool(
       if (classNames) allNames.push(...classNames);
 
       if (allNames.length === 0) {
-          return { content: [{ type: "text", text: "No class name provided." }] };
+          return { content: [{ type: "text", text: "No class name provided." }], isError: true };
       }
 
       const results = await Promise.all(allNames.map(name => resolveOne(name, coordinate)));
+      // Mark the batch as an error only when every result is an error.
+      const allErrored = results.length > 0 && results.every(r => r.isError);
 
-      return { content: [{ type: "text", text: results.join("\n\n") }] };
+      return {
+          content: [{ type: "text", text: results.map(r => r.text).join("\n\n") }],
+          ...(allErrored ? { isError: true } : {})
+      };
   }
 );
 
@@ -308,7 +306,7 @@ server.registerTool(
     if (queries) allQueries.push(...queries);
 
     if (allQueries.length === 0) {
-        return { content: [{ type: "text", text: "No query provided." }] };
+        return { content: [{ type: "text", text: "No query provided." }], isError: true };
     }
 
     const results = allQueries.map(q => {
@@ -371,7 +369,7 @@ server.registerTool(
     if (classNames) allNames.push(...classNames);
 
     if (allNames.length === 0) {
-        return { content: [{ type: "text", text: "No class name provided." }] };
+        return { content: [{ type: "text", text: "No class name provided." }], isError: true };
     }
 
     const results = allNames.map(name => {
@@ -410,7 +408,7 @@ server.registerTool(
     if (classNames) allNames.push(...classNames);
 
     if (allNames.length === 0) {
-        return { content: [{ type: "text", text: "No class name provided." }] };
+        return { content: [{ type: "text", text: "No class name provided." }], isError: true };
     }
 
     const results = allNames.map(name => {
@@ -436,9 +434,9 @@ server.registerTool(
 server.registerTool(
   "search_resources",
   {
-    description: "Search for resources (non-class files) inside JARs, such as properties files, XML configs, or proto files.",
+    description: "Search for text resources (non-class files) inside indexed JARs. Supports .properties, .xml, .json, .yaml/.yml, and META-INF/services/* entries up to 64KB. Use 'glob:' prefix for glob patterns, 'regex:' prefix for regex, otherwise substring match on the path.",
     inputSchema: z.object({
-      pattern: z.string().describe("Partial path or filename pattern to search for (e.g. 'log4j.xml', '.proto')"),
+      pattern: z.string().describe("Resource path pattern: plain substring (default), 'glob:*.xml', or 'regex:\\.properties$'. Matches against the in-JAR path (e.g. 'META-INF/services/java.sql.Driver')."),
     }),
   },
   async ({ pattern }) => {
@@ -455,18 +453,245 @@ server.registerTool(
 );
 
 server.registerTool(
+  "search_methods",
+  {
+    description: "Search for Java methods by name across indexed artifacts in the local Maven/Gradle caches. Returns matching method names with their declaring class and the artifacts that contain them. Requires method indexing to be enabled (INDEX_METHODS=1). Supports batch queries.",
+    inputSchema: z.object({
+      name: z.string().optional().describe("Method name (or substring) to search for"),
+      names: z.array(z.string()).optional().describe("Batch method names"),
+      exact: z.boolean().optional().describe("Exact match (default: substring match)"),
+    }),
+  },
+  async ({ name, names, exact }) => {
+    const allNames: string[] = [];
+    if (name) allNames.push(name);
+    if (names) allNames.push(...names);
+
+    if (allNames.length === 0) {
+        return { content: [{ type: "text", text: "No method name provided." }], isError: true };
+    }
+
+    const results = allNames.map(n => {
+        const matches = indexer.searchMethods(n, { exact });
+
+        const text = matches.length > 0
+            ? matches.map(m => {
+                const artifacts = m.artifacts.slice(0, 3).map(a => `${a.groupId}:${a.artifactId}:${a.version}`).join("\n    ");
+                const more = m.artifacts.length > 3 ? `\n    ... (${m.artifacts.length - 3} more)` : '';
+                return `Method: ${m.methodName}\n  Class: ${m.className}\n    ${artifacts}${more}`;
+              }).join("\n\n")
+            : `No methods found matching '${n}'. Ensure method indexing is enabled (INDEX_METHODS=1) and the index is up to date.`;
+
+        return `### Results for "${n}":\n${text}`;
+    });
+
+    return {
+        content: [{ type: "text", text: results.join("\n\n") }]
+    };
+  }
+);
+
+server.registerTool(
   "refresh_index",
   {
-    description: "Trigger a re-scan of the Maven repository. This will re-index all artifacts.",
+    description: "Trigger a re-scan of the Maven repository. Re-indexes all artifacts into shadow tables and atomically swaps on success. Returns an error result if the refresh fails.",
   },
   async () => {
-       // Re-run index
-       indexer.refresh().catch(console.error);
-       return {
-           content: [{ type: "text", text: "Index refresh started. All artifacts will be re-indexed." }]
-       };
+       try {
+           await indexer.refresh();
+           return {
+               content: [{ type: "text", text: "Index refresh complete. All artifacts have been re-indexed." }]
+           };
+       } catch (e) {
+           const message = e instanceof Error ? e.message : String(e);
+           return {
+               isError: true,
+               content: [{ type: "text", text: `Index refresh failed: ${message}` }]
+           };
+       }
    }
+);
+
+server.registerTool(
+  "info",
+  {
+    description: "Get detailed info about one or more artifacts matching a Maven coordinate. Returns the artifact path, layout, hasSource flag, indexed class count, indexed resource count, and whether the main JAR file still exists on disk. If version is omitted, returns info for every known version of the artifact.",
+    inputSchema: z.object({
+      coordinate: z.string().describe("Maven coordinate in the form 'groupId:artifactId' (lists all versions) or 'groupId:artifactId:version' (specific version)."),
+    }),
+  },
+  async ({ coordinate }) => {
+      const parts = coordinate.split(':');
+      if (parts.length < 2 || parts.length > 3) {
+          return { content: [{ type: "text", text: "Invalid coordinate format. Expected 'groupId:artifactId' or 'groupId:artifactId:version'." }], isError: true };
+      }
+      const [groupId, artifactId, version] = parts;
+      const items = indexer.getArtifactInfo(groupId, artifactId, version);
+
+      if (items.length === 0) {
+          return { content: [{ type: "text", text: `No artifact found for coordinate '${coordinate}'.` }], isError: true };
+      }
+
+      const text = items.map((item: ArtifactInfo) => {
+          const a = item.artifact;
+          return [
+              `### ${a.groupId}:${a.artifactId}:${a.version}`,
+              `- Path: ${a.abspath}`,
+              `- Layout: ${a.layout ?? 'unknown'}`,
+              `- Has Source: ${a.hasSource}`,
+              `- Main JAR Exists: ${item.mainJarExists}`,
+              `- Class Count: ${item.classCount}`,
+              `- Resource Count: ${item.resourceCount}`,
+          ].join('\n');
+      }).join('\n\n');
+
+      return { content: [{ type: "text", text }] };
+  }
+);
+
+server.registerTool(
+  "stats",
+  {
+    description: "Return aggregate statistics about the local Maven/Gradle index: total artifact count, indexed class count, indexed resource count, the SQLite DB file path and size in bytes, and the last-indexed timestamp (ISO string). Useful for sanity-checking index health and freshness.",
+    inputSchema: z.object({}),
+  },
+  async () => {
+      const stats: IndexStats = indexer.getStats();
+      const text = [
+          '### Index Statistics',
+          `- DB Path: ${stats.dbPath}`,
+          `- DB Size: ${stats.dbSizeBytes} bytes`,
+          `- Last Indexed At: ${stats.lastIndexedAt ?? 'never'}`,
+          `- Artifact Count: ${stats.artifactCount}`,
+          `- Class Count: ${stats.classCount}`,
+          `- Resource Count: ${stats.resourceCount}`,
+      ].join('\n');
+      return { content: [{ type: "text", text }] };
+  }
+);
+
+server.registerTool(
+  "list_classes",
+  {
+    description: "List all distinct Java/protobuf class names indexed for a specific Maven artifact coordinate. Useful for inspecting what classes an internal company library exposes. The coordinate MUST include the version.",
+    inputSchema: z.object({
+      coordinate: z.string().describe("Full Maven coordinate 'groupId:artifactId:version'. Version is required."),
+    }),
+  },
+  async ({ coordinate }) => {
+      const parts = coordinate.split(':');
+      if (parts.length !== 3) {
+          return { content: [{ type: "text", text: "Invalid coordinate format. Expected 'groupId:artifactId:version'." }], isError: true };
+      }
+      const [groupId, artifactId, version] = parts;
+      const classes = indexer.listClasses(groupId, artifactId, version);
+
+      if (classes.length === 0) {
+          return { content: [{ type: "text", text: `No classes found for artifact '${coordinate}'. Ensure the coordinate is correct and the artifact has been indexed.` }], isError: true };
+      }
+
+      const text = `### Classes in ${coordinate} (${classes.length} total)\n` + classes.map(c => `- ${c}`).join('\n');
+      return { content: [{ type: "text", text }] };
+  }
+);
+
+server.registerTool(
+  "get_resource",
+  {
+    description: "Retrieve the content of a single indexed text resource (proto file, XML, properties, JSON, YAML, META-INF/services/*) inside an artifact JAR. The coordinate MUST include the version. Returns the resource content, type label, and path. Resources larger than 64KB are not stored and will report as not found.",
+    inputSchema: z.object({
+      coordinate: z.string().describe("Full Maven coordinate 'groupId:artifactId:version'. Version is required."),
+      resourcePath: z.string().describe("In-JAR path of the resource (e.g. 'META-INF/services/java.sql.Driver' or 'config/app.proto')."),
+    }),
+  },
+  async ({ coordinate, resourcePath }) => {
+      const parts = coordinate.split(':');
+      if (parts.length !== 3) {
+          return { content: [{ type: "text", text: "Invalid coordinate format. Expected 'groupId:artifactId:version'." }], isError: true };
+      }
+      const [groupId, artifactId, version] = parts;
+      const resource = indexer.getResource(groupId, artifactId, version, resourcePath);
+
+      if (!resource) {
+          return { content: [{ type: "text", text: `Resource '${resourcePath}' not found in artifact '${coordinate}'.` }], isError: true };
+      }
+
+      const lang = resource.type === 'proto' ? 'protobuf' : resource.type;
+      const text = `### Resource: ${resource.path}\nArtifact: ${coordinate}\nType: ${resource.type}\n\n\`\`\`${lang}\n${resource.content}\n\`\`\``;
+      return { content: [{ type: "text", text }] };
+  }
+);
+
+server.registerTool(
+  "get_dependencies",
+  {
+    description: "Return the parsed Maven `<dependencies>` of an artifact (groupId:artifactId:version). Each entry includes groupId, artifactId, version (empty string when the POM omits it), scope (defaults to 'compile'), and the optional flag. Useful for understanding what an internal company library transitively pulls in. Requires the full coordinate including version.",
+    inputSchema: z.object({
+      coordinate: z.string().describe("Full Maven coordinate 'groupId:artifactId:version'. Version is required."),
+    }),
+  },
+  async ({ coordinate }) => {
+      const parts = coordinate.split(':');
+      if (parts.length !== 3) {
+          return { content: [{ type: "text", text: "Invalid coordinate format. Expected 'groupId:artifactId:version'." }], isError: true };
+      }
+      const [groupId, artifactId, version] = parts;
+      const deps = indexer.getDependencies(groupId, artifactId, version);
+
+      if (deps.length === 0) {
+          return { content: [{ type: "text", text: `No dependencies indexed for '${coordinate}'. Ensure the coordinate is correct and the artifact has been (re)indexed after POM parsing was enabled.` }], isError: true };
+      }
+
+      const text = `### Dependencies of ${coordinate} (${deps.length} total)\n` + deps.map(d => {
+          const versionPart = d.version ? `:${d.version}` : '';
+          const optPart = d.optional ? ' (optional)' : '';
+          return `- ${d.groupId}:${d.artifactId}${versionPart} (scope: ${d.scope})${optPart}`;
+      }).join('\n');
+      return { content: [{ type: "text", text }] };
+  }
+);
+
+server.registerTool(
+  "find_dependents",
+  {
+    description: "Find indexed artifacts that declare a dependency on the given coordinate. Matching is by groupId:artifactId only — version is optional in the input. Returns each dependent artifact's full coordinate and the declared scope (defaults to 'compile'). Useful for impact analysis when changing an internal library.",
+    inputSchema: z.object({
+      coordinate: z.string().describe("Maven coordinate 'groupId:artifactId' or 'groupId:artifactId:version'. Version is optional — dependents are matched by groupId:artifactId only."),
+    }),
+  },
+  async ({ coordinate }) => {
+      const parts = coordinate.split(':');
+      if (parts.length < 2 || parts.length > 3) {
+          return { content: [{ type: "text", text: "Invalid coordinate format. Expected 'groupId:artifactId' or 'groupId:artifactId:version'." }], isError: true };
+      }
+      const [groupId, artifactId] = parts;
+      const dependents = indexer.findDependents(groupId, artifactId);
+
+      if (dependents.length === 0) {
+          return { content: [{ type: "text", text: `No indexed artifacts depend on '${groupId}:${artifactId}'.` }], isError: true };
+      }
+
+      const text = `### Dependents of ${groupId}:${artifactId} (${dependents.length} total)\n` + dependents.map(d => {
+          return `- ${d.groupId}:${d.artifactId}:${d.version} (scope: ${d.scope})`;
+      }).join('\n');
+      return { content: [{ type: "text", text }] };
+  }
 );
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// Graceful shutdown (T3.7): stop watcher + timers, close DB, exit 0.
+async function shutdown() {
+  try {
+    await indexer.stopWatch();
+    indexer.stopSchedule();
+    DB.getInstance().close();
+  } catch (e) {
+    console.error("Error during shutdown:", e);
+  }
+  process.exit(0);
+}
+
+process.on('SIGINT', () => { void shutdown(); });
+process.on('SIGTERM', () => { void shutdown(); });
