@@ -3,7 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
-import { DB } from '../src/db/index';
+import { DB } from '@maven-indexer/engine';
 
 const TEST_REPO_DIR = path.resolve('test-repo-batch');
 const DB_FILE = 'maven-index-batch.sqlite';
@@ -121,13 +121,14 @@ describe('MCP Server Batch Queries', () => {
     it('should support batch queries', async () => {
         execSync('npm run build');
 
-        server = spawn('node', ['build/index.js'], {
+        server = spawn('node', ['packages/mcp/dist/index.js'], {
             stdio: ['pipe', 'pipe', 'inherit'],
             env: { 
                 ...process.env, 
                 MAVEN_REPO_PATH: TEST_REPO_DIR,
                 GRADLE_REPO_PATH: "/non-existent",
-                DB_FILE: DB_FILE
+                DB_FILE: DB_FILE,
+                MAVEN_INDEXER_MCP_TOOLS: ''
             }
         });
 
@@ -144,7 +145,7 @@ describe('MCP Server Batch Queries', () => {
 
         // Batch search_classes
         const classesRes = await sendRequest("tools/call", {
-            name: "search_classes",
+            name: "search",
             arguments: { classNames: ["BatchClass1", "BatchClass2"] }
         });
         expect(classesRes.content[0].text).toContain("Results for \"BatchClass1\"");
@@ -152,8 +153,8 @@ describe('MCP Server Batch Queries', () => {
         
         // Batch get_class_details
         const detailsRes = await sendRequest("tools/call", {
-            name: "get_class_details",
-            arguments: { 
+            name: "get_class",
+            arguments: {
                 classNames: ["com.example.demo.BatchClass1", "com.example.demo.BatchClass2"],
                 type: "signatures"
             }

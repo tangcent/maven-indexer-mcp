@@ -3,9 +3,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
-import { Indexer } from '../src/indexer.js';
-import { Config } from '../src/config.js';
-import { DB } from '../src/db/index.js';
+import { Indexer, Config, DB } from '@maven-indexer/engine';
 
 const TEST_DIR = path.resolve(__dirname, '../test_temp_proto_multi');
 const REPO_DIR = path.join(TEST_DIR, 'repo');

@@ -35,5 +35,8 @@ jobs:
     - name: Build
       run: npm run build
 
+    - name: Check no duplicate module basenames (Req 3.3)
+      run: node scripts/check-no-duplicate-basenames.js
+
     - name: Test
       run: npm test

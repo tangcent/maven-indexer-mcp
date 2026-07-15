@@ -3,9 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { execSync } from 'child_process';
-import { Indexer } from '../src/indexer';
-import { Config } from '../src/config';
-import { DB } from '../src/db/index';
+import { Indexer, Config, DB } from '@maven-indexer/engine';
 
 function buildArtifact(
     repoRoot: string,

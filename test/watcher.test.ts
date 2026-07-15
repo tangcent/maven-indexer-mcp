@@ -16,8 +16,7 @@ vi.mock('chokidar', () => ({
 // Keep a reference to chokidar mock for assertions
 import chokidar from 'chokidar';
 
-import { Config } from '../src/config';
-import { Indexer } from '../src/indexer';
+import { Config, Indexer } from '@maven-indexer/engine';
 import fsSync from 'fs';
 
 describe('Indexer startWatch - glob pattern generation', () => {

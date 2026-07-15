@@ -1,0 +1,32 @@
+{
+  "name": "@maven-indexer/engine",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./watcher": {
+      "types": "./dist/watcher.d.ts",
+      "default": "./dist/watcher.js"
+    },
+    "./tool_catalog": {
+      "types": "./dist/tool_catalog.d.ts",
+      "default": "./dist/tool_catalog.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.5.0",
+    "chokidar": "^5.0.0",
+    "semver": "^7.7.3",
+    "xml2js": "^0.6.2",
+    "yauzl": "^3.2.0"
+  }
+}

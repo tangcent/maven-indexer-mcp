@@ -7,12 +7,16 @@ import { FSWatcher } from 'chokidar';
 import { Config } from './config.js';
 import { DB } from './db/index.js';
 import { ClassParser } from './class_parser.js';
+import { CallEdge, InvokeKind } from './bytecode_walker.js';
 import { ProtoParser } from './proto_parser.js';
 import { PomParser } from './pom_parser.js';
+import { ArtifactResolver } from './artifact_resolver.js';
 import {
     Layout,
     resolveMainJar,
+    resolveSourcesJar,
     selectMainJar,
+    EXCLUDED_CLASSIFIERS,
 } from './path_helpers.js';
 import { escapeLike, likeContains, buildFtsQuery, compileUserRegex } from './sql_helpers.js';
 
@@ -72,9 +76,64 @@ interface MethodRow {
     layout?: string | null;
 }
 
+/** Raw shape of a deduped call-edge group row (before artifact join). */
+interface EdgeGroupRow {
+    class_name: string;
+    method_name: string;
+    method_descriptor: string | null;
+    invoke_kind: string;
+    resolved: number;
+    sites: number;
+}
+
+/** Result of `searchCallers` / `searchCallees` — a deduped edge with artifacts. */
+export interface CallEdgeResult {
+    className: string;
+    methodName: string;
+    methodDescriptor?: string;
+    invokeKind: InvokeKind;
+    resolved: boolean;
+    sites: number;
+    artifacts: Artifact[];
+}
+
+/** A node in the transitive-impact result set (Module 4 Req 3). */
+export interface ImpactNode {
+    className: string;
+    methodName?: string;
+    depth: number;            // 1 = direct caller, 2 = caller-of-caller, ...
+    path: string[];           // chain "Class" or "Class.method" from target to this node (inclusive)
+    cycle: boolean;           // true if this node was re-encountered (cycle or diamond)
+}
+
+/** Result of `impact` — transitive fan-out with caps and cycle markers. */
+export interface ImpactResult {
+    nodes: ImpactNode[];
+    truncated: number;        // count of nodes beyond maxNodes
+    callGraphAvailable: boolean;
+    maxDepth: number;
+    maxNodes: number;
+}
+
+/**
+ * Result of an indexing run. Returned by `index()` and `refresh()`.
+ * - scanned: total artifacts considered (after quick-scan reduction)
+ * - added:   artifacts newly inserted into the `artifacts` table this run
+ * - updated: existing artifacts re-indexed (mtime changed or full-scan reset)
+ * - pruned:  artifacts deleted because their JAR no longer exists
+ * - durationMs: wall-clock duration of the run
+ */
+export interface RefreshResult {
+    scanned: number;
+    added: number;
+    updated: number;
+    pruned: number;
+    durationMs: number;
+}
+
 /**
  * Singleton class responsible for indexing Maven artifacts.
- * It scans the local repository, watches for changes, and indexes Java classes.
+ * It scans the local repository and indexes Java classes.
  */
 export class Indexer {
     private static instance: Indexer;
@@ -86,6 +145,8 @@ export class Indexer {
     private scheduleTimer: NodeJS.Timeout | null = null;
     /** When true, indexArtifactClasses writes into `_new` shadow tables. */
     private shadowMode: boolean = false;
+    /** Number of classes skipped during the current/last indexing run due to EXCLUDED_PACKAGES. */
+    private skippedByExcludes: number = 0;
 
     private constructor() {
     }
@@ -301,7 +362,7 @@ export class Indexer {
      * Builds into `_new` tables, then atomically swaps on success.
      * On failure, old index is left untouched.
      */
-    public async refresh() {
+    public async refresh(opts: { quickScan?: boolean; groupIdPrefix?: string } = {}): Promise<RefreshResult> {
         const db = DB.getInstance();
         console.error("Refreshing index (shadow-table mode)...");
 
@@ -328,11 +389,25 @@ export class Indexer {
                 optional INTEGER DEFAULT 0,
                 FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
             );
+            DROP TABLE IF EXISTS call_edges_new;
+            CREATE TABLE call_edges_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caller_class TEXT NOT NULL,
+                caller_method TEXT NOT NULL,
+                caller_descriptor TEXT,
+                callee_class TEXT NOT NULL,
+                callee_method TEXT NOT NULL,
+                callee_descriptor TEXT,
+                invoke_kind TEXT NOT NULL,
+                artifact_id INTEGER NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
+            );
         `);
         db.prepare('UPDATE artifacts SET is_indexed = 0').run();
 
         try {
-            await this.index({ shadow: true });
+            const result = await this.index({ ...opts, shadow: true });
 
             // 2. Atomic swap
             db.transaction(() => {
@@ -348,6 +423,8 @@ export class Indexer {
                 db.exec('ALTER TABLE methods_new RENAME TO methods');
                 db.exec('DROP TABLE IF EXISTS dependencies');
                 db.exec('ALTER TABLE dependencies_new RENAME TO dependencies');
+                db.exec('DROP TABLE IF EXISTS call_edges');
+                db.exec('ALTER TABLE call_edges_new RENAME TO call_edges');
                 db.exec('CREATE INDEX IF NOT EXISTS idx_inheritance_parent ON inheritance(parent_class_name)');
                 db.exec('CREATE INDEX IF NOT EXISTS idx_resources_artifact ON resources(artifact_id)');
                 db.exec('CREATE INDEX IF NOT EXISTS idx_resource_classes_class ON resource_classes(class_name)');
@@ -355,9 +432,13 @@ export class Indexer {
                 db.exec('CREATE INDEX IF NOT EXISTS idx_methods_class ON methods(class_name)');
                 db.exec('CREATE INDEX IF NOT EXISTS idx_dependencies_artifact ON dependencies(artifact_id)');
                 db.exec('CREATE INDEX IF NOT EXISTS idx_dependencies_dep ON dependencies(dep_group_id, dep_artifact_id)');
+                db.exec('CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_class, caller_method)');
+                db.exec('CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_class, callee_method)');
                 db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed_at', ?)").run(new Date().toISOString());
+                db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_skipped_by_excludes', ?)").run(String(this.skippedByExcludes));
             });
             console.error("Shadow-table swap complete.");
+            return result;
         } catch (e) {
             // 3. Cleanup shadow tables; old index untouched
             console.error("Refresh failed, cleaning up shadow tables...", e);
@@ -368,6 +449,7 @@ export class Indexer {
                 DROP TABLE IF EXISTS resource_classes_new;
                 DROP TABLE IF EXISTS methods_new;
                 DROP TABLE IF EXISTS dependencies_new;
+                DROP TABLE IF EXISTS call_edges_new;
             `);
             throw e;
         }
@@ -378,16 +460,28 @@ export class Indexer {
      * 1. Scans the file system for Maven artifacts.
      * 2. Synchronizes the database with found artifacts.
      * 3. Indexes classes for artifacts that haven't been indexed yet.
+     *
+     * Returns a `RefreshResult` with counts of scanned/added/updated/pruned artifacts
+     * and the wall-clock duration. In shadow mode (called by `refresh()`), the
+     * mtime-based incremental path is skipped, so `pruned` is always 0 and all
+     * existing artifacts are re-indexed.
      */
-    public async index(opts: { shadow?: boolean } = {}) {
+    public async index(opts: { quickScan?: boolean; groupIdPrefix?: string; shadow?: boolean } = {}): Promise<RefreshResult> {
         if (this.isIndexing) {
             // Coalesce: queue at most one follow-up pass (T3.1).
             this.pendingReindex = true;
-            return;
+            return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0 };
         }
+        const startTime = Date.now();
         this.isIndexing = true;
         this.shadowMode = opts.shadow ?? false;
         console.error("Starting index...");
+        this.skippedByExcludes = 0;
+
+        // Counts tracked across the run.
+        let scanned = 0;
+        let added = 0;
+        let pruned = 0;
 
         try {
             const config = await Config.getInstance();
@@ -397,7 +491,19 @@ export class Indexer {
 
             if (!repoPath && !gradleRepoPath) {
                 console.error("No repository path found.");
-                return;
+                return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: Date.now() - startTime };
+            }
+
+            // Incremental path: prune already-indexed classes that the current
+            // EXCLUDED_PACKAGES now filters out (so a filter change is honored
+            // without a full shadow-table rebuild). Skipped in shadow mode
+            // (refresh() rebuilds into fresh tables, so excludes are honored
+            // naturally by the indexing loop).
+            if (!this.shadowMode && config.normalizedExcludedPackages.length > 0) {
+                const prunedByFilter = this.pruneExcludedClasses(config.normalizedExcludedPackages);
+                if (prunedByFilter > 0) {
+                    console.error(`Pruned ${prunedByFilter} class row(s) matching EXCLUDED_PACKAGES.`);
+                }
             }
 
             // 1. Scan for artifacts
@@ -420,6 +526,33 @@ export class Indexer {
 
             console.error(`Found ${artifacts.length} total artifacts on disk.`);
 
+            // Apply groupIdPrefix filter if specified
+            if (opts.groupIdPrefix) {
+                const prefix = opts.groupIdPrefix;
+                artifacts = artifacts.filter(a => a.groupId === prefix || a.groupId.startsWith(prefix + '.'));
+                console.error(`After groupIdPrefix filter (${prefix}): ${artifacts.length} artifacts.`);
+            }
+
+            // Apply quick scan: keep only best version per groupId:artifactId
+            if (opts.quickScan) {
+                console.error('[quick-scan] Indexing only best version per artifact...');
+                const groups = new Map<string, Artifact[]>();
+                for (const art of artifacts) {
+                    const key = `${art.groupId}:${art.artifactId}`;
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key)!.push(art);
+                }
+                const winners: Artifact[] = [];
+                for (const candidates of groups.values()) {
+                    const best = await ArtifactResolver.resolveBestArtifact(candidates);
+                    if (best) winners.push(best);
+                }
+                artifacts = winners;
+                console.error(`Quick scan: reduced to ${artifacts.length} artifacts (one per groupId:artifactId).`);
+            }
+
+            scanned = artifacts.length;
+
             // 2. Persist artifacts and determine what needs indexing
             // We use is_indexed = 0 for new artifacts.
             const insertArtifact = db.prepare(`
@@ -428,10 +561,11 @@ export class Indexer {
                 VALUES (@groupId, @artifactId, @version, @abspath, @hasSource, 0, @layout)
             `);
 
-            // Use a transaction only for the batch insert of artifacts
+            // Use a transaction only for the batch insert of artifacts.
+            // Track `added` via INSERT OR IGNORE changes (1 = newly inserted, 0 = already existed).
             db.transaction(() => {
                 for (const art of artifacts) {
-                    insertArtifact.run({
+                    const res = insertArtifact.run({
                         groupId: art.groupId,
                         artifactId: art.artifactId,
                         version: art.version,
@@ -439,6 +573,7 @@ export class Indexer {
                         hasSource: art.hasSource ? 1 : 0,
                         layout: art.layout ?? null
                     });
+                    added += res.changes;
                 }
             });
 
@@ -521,17 +656,20 @@ export class Indexer {
                         const deleteInheritanceStmt = db.prepare('DELETE FROM inheritance WHERE artifact_id = ?');
                         const deleteResourcesStmt = db.prepare('DELETE FROM resources WHERE artifact_id = ?');
                         const deleteResourceClassesStmt = db.prepare('DELETE FROM resource_classes WHERE resource_id IN (SELECT id FROM resources WHERE artifact_id = ?)');
+                        const deleteCallEdgesStmt = db.prepare('DELETE FROM call_edges WHERE artifact_id = ?');
                         const deleteMtimesStmt = db.prepare('DELETE FROM artifact_dir_mtimes WHERE artifact_id = ?');
                         for (const id of artifactsToDelete) {
                             deleteResourceClassesStmt.run(id);
                             deleteResourcesStmt.run(id);
                             deleteClassesStmt.run(id);
                             deleteInheritanceStmt.run(id);
+                            deleteCallEdgesStmt.run(id);
                             deleteMtimesStmt.run(id);
                             deleteArtifactsStmt.run(id);
                         }
                     });
                 }
+                pruned = artifactsToDelete.length;
             }
 
             // 3. Find artifacts that need indexing (is_indexed = 0)
@@ -542,6 +680,9 @@ export class Indexer {
             `).all() as Artifact[];
 
             console.error(`${artifactsToIndex.length} artifacts need indexing.`);
+
+            // `updated` = existing artifacts re-indexed (total to index minus newly added).
+            const updated = Math.max(0, artifactsToIndex.length - added);
 
             // 4. Scan JARs for classes and update DB
             const CHUNK_SIZE = 50;
@@ -579,9 +720,11 @@ export class Indexer {
                 const now = new Date().toISOString();
                 db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed_at', ?)").run(now);
                 db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_full_scan', ?)").run(now);
+                db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_skipped_by_excludes', ?)").run(String(this.skippedByExcludes));
             }
 
             console.error(`Indexing complete.`);
+            return { scanned, added, updated, pruned, durationMs: Date.now() - startTime };
         } catch (e) {
             console.error("Indexing failed", e);
             throw e; // propagate to caller
@@ -814,6 +957,7 @@ export class Indexer {
                 const inheritance: { className: string, parent: string, type: 'extends' | 'implements' }[] = [];
                 const resources: { path: string, content: string, type: string, protoInfo?: any }[] = [];
                 const methodData: { className: string, methods: string[] }[] = [];
+                const callEdgeData: CallEdge[] = [];
 
                 zipfile.on('entry', (entry) => {
                     if (entry.fileName.endsWith('.class')) {
@@ -829,15 +973,23 @@ export class Indexer {
                                 try {
                                     const info = ClassParser.parse(buffer);
                                     if (!info.className.includes('$') && info.className.length > 0) {
-                                        if (this.isPackageIncluded(info.className, config.normalizedIncludedPackages)) {
+                                        if (this.shouldIndexClass(info.className, config)) {
                                             classes.push(info.className);
                                             methodData.push({ className: info.className, methods: info.methods ?? [] });
+                                            if (info.callEdges && info.callEdges.length > 0) {
+                                                for (const edge of info.callEdges) {
+                                                    callEdgeData.push(edge);
+                                                }
+                                            }
                                             if (info.superClass && info.superClass !== 'java.lang.Object') {
                                                 inheritance.push({ className: info.className, parent: info.superClass, type: 'extends' });
                                             }
                                             for (const iface of info.interfaces) {
                                                 inheritance.push({ className: info.className, parent: iface, type: 'implements' });
                                             }
+                                        } else if (this.isPackageIncluded(info.className, config.normalizedExcludedPackages)) {
+                                            // Skipped specifically by EXCLUDED_PACKAGES (not by include-filter).
+                                            this.skippedByExcludes++;
                                         }
                                     }
                                 } catch (e) {
@@ -903,12 +1055,13 @@ export class Indexer {
 
                 zipfile.on('end', () => {
                     try {
-                        db.transaction(() => {
-                            const classesTable = this.tableName('classes_fts');
-                            const inheritanceTable = this.tableName('inheritance');
-                            const resourcesTable = this.tableName('resources');
-                            const resourceClassesTable = this.tableName('resource_classes');
+                        // Resolve table names once (honors shadow mode for refresh()).
+                        const classesTable = this.tableName('classes_fts');
+                        const inheritanceTable = this.tableName('inheritance');
+                        const resourcesTable = this.tableName('resources');
+                        const resourceClassesTable = this.tableName('resource_classes');
 
+                        db.transaction(() => {
                             const insertClass = db.prepare(`
                                 INSERT INTO ${classesTable} (artifact_id, class_name, simple_name)
                                 VALUES (?, ?, ?)
@@ -943,7 +1096,7 @@ export class Indexer {
                                 if (res.type === 'proto' && res.protoInfo) {
                                     let packageName = res.protoInfo.javaPackage || res.protoInfo.package || '';
                                     let outerClassName = res.protoInfo.javaOuterClassname;
-                                    
+
                                     if (!outerClassName) {
                                         const baseName = res.path.split('/').pop()?.replace('.proto', '') || '';
                                         outerClassName = baseName.split('_').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
@@ -968,7 +1121,7 @@ export class Indexer {
                                             });
                                         }
                                     }
-                                    
+
                                     for (const fullClassName of classesToIndex) {
                                         insertResourceClass.run(resourceId, fullClassName);
                                         const simpleName = fullClassName.split('.').pop() || fullClassName;
@@ -990,6 +1143,33 @@ export class Indexer {
                                     for (const methodName of cls.methods) {
                                         insertMethod.run(artifact.id, cls.className, methodName, null);
                                     }
+                                }
+                            }
+
+                            // Index call-graph edges (enabled by default; opt-out via INDEX_CALL_GRAPH=0).
+                            // The parser already suppresses callEdges when the flag is off, so this
+                            // block is a no-op in that case.
+                            if (callEdgeData.length > 0) {
+                                const callEdgesTable = this.tableName('call_edges');
+                                const insertCallEdge = db.prepare(`
+                                    INSERT INTO ${callEdgesTable}
+                                        (caller_class, caller_method, caller_descriptor,
+                                         callee_class, callee_method, callee_descriptor,
+                                         invoke_kind, artifact_id, resolved)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                `);
+                                for (const edge of callEdgeData) {
+                                    insertCallEdge.run(
+                                        edge.callerClass,
+                                        edge.callerMethod,
+                                        edge.callerDescriptor ?? null,
+                                        edge.calleeClass,
+                                        edge.calleeMethod,
+                                        edge.calleeDescriptor ?? null,
+                                        edge.invokeKind,
+                                        artifact.id,
+                                        edge.resolved ? 1 : 0,
+                                    );
                                 }
                             }
 
@@ -1084,6 +1264,31 @@ export class Indexer {
         }
 
         return false;
+    }
+
+    /**
+     * Decides whether a class should be indexed under the current filter config.
+     *
+     * Precedence (per requirements-index-filtering.md Req 1 AC3):
+     *   1. Force-include (`INCLUDED_PACKAGES` entry ending in `!`) → index.
+     *   2. Exclude (`EXCLUDED_PACKAGES`) → skip.
+     *   3. Include (`INCLUDED_PACKAGES`) → index.
+     *   4. Otherwise → skip.
+     *
+     * Returns true when the class should be indexed.
+     */
+    private shouldIndexClass(className: string, config: Config): boolean {
+        // 1. Force-include always wins. (Empty force-list means no force-includes;
+        //    unlike `includedPackages`, empty here does NOT mean "match all".)
+        if (config.forceIncludedPackages.length > 0 && this.isPackageIncluded(className, config.forceIncludedPackages)) {
+            return true;
+        }
+        // 2. Exclude takes precedence over plain include.
+        if (config.normalizedExcludedPackages.length > 0 && this.isPackageIncluded(className, config.normalizedExcludedPackages)) {
+            return false;
+        }
+        // 3. Plain include (empty means "include all" — current default behavior).
+        return this.isPackageIncluded(className, config.normalizedIncludedPackages);
     }
 
     /**
@@ -1297,6 +1502,271 @@ export class Indexer {
     }
 
     /**
+     * Returns true when the `call_edges` table exists and has at least one row.
+     * Used by `callers`/`callees`/`impact`/`trace` to report
+     * `_meta.callGraphAvailable` (Module 4 Req 2/3, Module 2 Req 2).
+     */
+    public isCallGraphAvailable(): boolean {
+        const db = DB.getInstance();
+        try {
+            const row = db.prepare('SELECT EXISTS(SELECT 1 FROM call_edges LIMIT 1) as e').get() as { e: number };
+            return Boolean(row.e);
+        } catch {
+            // Table missing — old index without migration v9.
+            return false;
+        }
+    }
+
+    /**
+     * Lists callers of `className[.methodName]` — edges whose callee matches.
+     *
+     * Per Module 4 Req 2:
+     * - When `methodName` is omitted, returns edges for all methods of the class.
+     * - Results are deduplicated by (caller_class, caller_method, caller_descriptor,
+     *   invoke_kind, resolved) with a `sites` count.
+     * - Each result includes the artifacts where the caller class is defined.
+     * - Capped at `limit` (default 50, max 500).
+     */
+    public searchCallers(
+        className: string,
+        methodName: string | undefined,
+        limit: number = 50,
+    ): CallEdgeResult[] {
+        const cappedLimit = Math.max(1, Math.min(500, limit));
+        const db = DB.getInstance();
+        try {
+            const whereClause = methodName
+                ? 'WHERE ce.callee_class = ? AND ce.callee_method = ?'
+                : 'WHERE ce.callee_class = ?';
+            const params = methodName ? [className, methodName, cappedLimit] : [className, cappedLimit];
+            const rows = db.prepare(`
+                SELECT
+                    e.caller_class       AS class_name,
+                    e.caller_method      AS method_name,
+                    e.caller_descriptor  AS method_descriptor,
+                    e.invoke_kind        AS invoke_kind,
+                    e.resolved           AS resolved,
+                    e.sites              AS sites,
+                    a.id, a.group_id, a.artifact_id, a.version, a.abspath, a.has_source, a.layout
+                FROM (
+                    SELECT ce.caller_class, ce.caller_method, ce.caller_descriptor,
+                           ce.invoke_kind, ce.resolved, COUNT(*) AS sites
+                    FROM call_edges ce
+                    ${whereClause}
+                    GROUP BY ce.caller_class, ce.caller_method, ce.caller_descriptor,
+                             ce.invoke_kind, ce.resolved
+                    ORDER BY sites DESC
+                    LIMIT ?
+                ) e
+                LEFT JOIN classes_fts cf ON cf.class_name = e.caller_class
+                LEFT JOIN artifacts a ON cf.artifact_id = a.id
+            `).all(...params) as (EdgeGroupRow & ArtifactRow)[];
+
+            return this.groupCallEdgeResults(rows);
+        } catch (e) {
+            console.error(`searchCallers failed (className=${JSON.stringify(className)}, methodName=${JSON.stringify(methodName)})`, e);
+            return [];
+        }
+    }
+
+    /**
+     * Lists callees of `className[.methodName]` — edges whose caller matches.
+     *
+     * Same dedup / artifact / limit semantics as `searchCallers`, but the
+     * artifact is resolved via the callee class (where the callee is defined).
+     */
+    public searchCallees(
+        className: string,
+        methodName: string | undefined,
+        limit: number = 50,
+    ): CallEdgeResult[] {
+        const cappedLimit = Math.max(1, Math.min(500, limit));
+        const db = DB.getInstance();
+        try {
+            const whereClause = methodName
+                ? 'WHERE ce.caller_class = ? AND ce.caller_method = ?'
+                : 'WHERE ce.caller_class = ?';
+            const params = methodName ? [className, methodName, cappedLimit] : [className, cappedLimit];
+            const rows = db.prepare(`
+                SELECT
+                    e.callee_class       AS class_name,
+                    e.callee_method      AS method_name,
+                    e.callee_descriptor  AS method_descriptor,
+                    e.invoke_kind        AS invoke_kind,
+                    e.resolved           AS resolved,
+                    e.sites              AS sites,
+                    a.id, a.group_id, a.artifact_id, a.version, a.abspath, a.has_source, a.layout
+                FROM (
+                    SELECT ce.callee_class, ce.callee_method, ce.callee_descriptor,
+                           ce.invoke_kind, ce.resolved, COUNT(*) AS sites
+                    FROM call_edges ce
+                    ${whereClause}
+                    GROUP BY ce.callee_class, ce.callee_method, ce.callee_descriptor,
+                             ce.invoke_kind, ce.resolved
+                    ORDER BY sites DESC
+                    LIMIT ?
+                ) e
+                LEFT JOIN classes_fts cf ON cf.class_name = e.callee_class
+                LEFT JOIN artifacts a ON cf.artifact_id = a.id
+            `).all(...params) as (EdgeGroupRow & ArtifactRow)[];
+
+            return this.groupCallEdgeResults(rows);
+        } catch (e) {
+            console.error(`searchCallees failed (className=${JSON.stringify(className)}, methodName=${JSON.stringify(methodName)})`, e);
+            return [];
+        }
+    }
+
+    /** Groups denormalized call-edge rows into CallEdgeResult entries. */
+    private groupCallEdgeResults(rows: (EdgeGroupRow & ArtifactRow)[]): CallEdgeResult[] {
+        const map = new Map<string, CallEdgeResult>();
+        for (const row of rows) {
+            const key = `${row.class_name}\u0000${row.method_name}\u0000${row.method_descriptor ?? ''}\u0000${row.invoke_kind}\u0000${row.resolved}`;
+            let entry = map.get(key);
+            if (!entry) {
+                entry = {
+                    className: row.class_name,
+                    methodName: row.method_name,
+                    methodDescriptor: row.method_descriptor ?? undefined,
+                    invokeKind: row.invoke_kind as InvokeKind,
+                    resolved: Boolean(row.resolved),
+                    sites: row.sites,
+                    artifacts: [],
+                };
+                map.set(key, entry);
+            }
+            if (row.id != null) {
+                const art = this.mapArtifact(row);
+                if (!entry.artifacts.some(a => a.id === art.id)) {
+                    entry.artifacts.push(art);
+                }
+            }
+        }
+        return Array.from(map.values());
+    }
+
+    /**
+     * Computes the transitive fan-out of callers for `className[.methodName]`
+     * via iterative BFS (Module 4 Req 3).
+     *
+     * - Traversal goes UP the call graph (who calls the target, who calls them, ...).
+     * - Depth is capped at `maxDepth` (default 3, max 5).
+     * - Total nodes are capped at `maxNodes` (default 200, max 1000); overflow
+     *   is counted in `truncated`.
+     * - Cycles are detected via a global `visited` set; a node re-encountered
+     *   is marked `cycle: true` (reported once, not re-enqueued).
+     * - When `INDEX_CALL_GRAPH=0` was set at index time, returns an empty
+     *   result with `callGraphAvailable: false`.
+     * - When `methodName` is omitted, traversal is class-level (nodes are
+     *   classes); otherwise method-level (nodes are Class.method pairs).
+     */
+    public impact(
+        className: string,
+        methodName: string | undefined,
+        opts: { depth?: number; maxNodes?: number } = {},
+    ): ImpactResult {
+        const maxDepth = Math.max(1, Math.min(5, opts.depth ?? 3));
+        const maxNodes = Math.max(1, Math.min(1000, opts.maxNodes ?? 200));
+
+        if (!this.isCallGraphAvailable()) {
+            return { nodes: [], truncated: 0, callGraphAvailable: false, maxDepth, maxNodes };
+        }
+
+        const methodLevel = methodName !== undefined;
+        const targetKey = methodLevel ? `${className}.${methodName}` : className;
+
+        // visited includes the target root (not returned in results).
+        const visited = new Map<string, ImpactNode>();
+        visited.set(targetKey, {
+            className, methodName, depth: 0, path: [targetKey], cycle: false,
+        });
+
+        const queue: Array<{ className: string; methodName: string | undefined; depth: number; path: string[] }> = [
+            { className, methodName, depth: 0, path: [targetKey] },
+        ];
+        let truncated = 0;
+
+        while (queue.length > 0) {
+            const current = queue.shift()!;
+            if (current.depth >= maxDepth) continue;
+
+            const callers = this.fetchDirectCallers(current.className, current.methodName, methodLevel);
+            for (const caller of callers) {
+                const callerKey = caller.methodName !== undefined
+                    ? `${caller.className}.${caller.methodName}`
+                    : caller.className;
+
+                const existing = visited.get(callerKey);
+                if (existing) {
+                    // Re-encountered — mark as cycle (diamond or true cycle).
+                    existing.cycle = true;
+                    continue;
+                }
+
+                // -1 because the target root is in `visited` but not in results.
+                if (visited.size - 1 >= maxNodes) {
+                    truncated++;
+                    continue;
+                }
+
+                const newPath = [...current.path, callerKey];
+                const node: ImpactNode = {
+                    className: caller.className,
+                    methodName: caller.methodName,
+                    depth: current.depth + 1,
+                    path: newPath,
+                    cycle: false,
+                };
+                visited.set(callerKey, node);
+                queue.push({
+                    className: caller.className,
+                    methodName: caller.methodName,
+                    depth: current.depth + 1,
+                    path: newPath,
+                });
+            }
+        }
+
+        const nodes = Array.from(visited.values()).filter(n => n.depth > 0);
+        return { nodes, truncated, callGraphAvailable: true, maxDepth, maxNodes };
+    }
+
+    /**
+     * Fetches direct caller nodes for the impact BFS.
+     * When `methodLevel` is true, returns (class, method) pairs; otherwise
+     * just distinct caller classes.
+     */
+    private fetchDirectCallers(
+        className: string,
+        methodName: string | undefined,
+        methodLevel: boolean,
+    ): { className: string; methodName: string | undefined }[] {
+        const db = DB.getInstance();
+        try {
+            let rows: any[];
+            if (methodLevel && methodName) {
+                rows = db.prepare(`
+                    SELECT DISTINCT caller_class, caller_method
+                    FROM call_edges
+                    WHERE callee_class = ? AND callee_method = ?
+                `).all(className, methodName);
+            } else {
+                rows = db.prepare(`
+                    SELECT DISTINCT caller_class
+                    FROM call_edges
+                    WHERE callee_class = ?
+                `).all(className);
+            }
+            return rows.map((r: any) => ({
+                className: r.caller_class as string,
+                methodName: methodLevel ? (r.caller_method as string | undefined) : undefined,
+            }));
+        } catch {
+            return [];
+        }
+    }
+
+    /**
      * Searches for methods by name across indexed artifacts.
      *
      * Options:
@@ -1471,6 +1941,7 @@ export class Indexer {
   public getStats(): IndexStats {
       const db = DB.getInstance();
       const meta = db.prepare("SELECT value FROM meta WHERE key='last_indexed_at'").get() as { value: string } | undefined;
+      const skipMeta = db.prepare("SELECT value FROM meta WHERE key='last_skipped_by_excludes'").get() as { value: string } | undefined;
       const artifactCount = (db.prepare('SELECT COUNT(*) as n FROM artifacts').get() as { n: number }).n;
       const classCount = (db.prepare('SELECT COUNT(*) as n FROM classes_fts').get() as { n: number }).n;
       const resourceCount = (db.prepare('SELECT COUNT(*) as n FROM resources').get() as { n: number }).n;
@@ -1488,7 +1959,53 @@ export class Indexer {
           resourceCount,
           dbPath,
           dbSizeBytes,
+          skippedByExcludes: skipMeta ? Number(skipMeta.value) : 0,
       };
+  }
+
+  /**
+   * Lists indexed class names that would be excluded under the given patterns.
+   * Used by `doctor --check-filters` to preview the effect of a filter change.
+   */
+  public listClassesMatchingExcludes(normalizedExcludes: string[]): string[] {
+      if (!normalizedExcludes || normalizedExcludes.length === 0) return [];
+      const db = DB.getInstance();
+      const rows = db.prepare('SELECT DISTINCT class_name FROM classes_fts').all() as { class_name: string }[];
+      const matches: string[] = [];
+      for (const row of rows) {
+          for (const pattern of normalizedExcludes) {
+              if (row.class_name === pattern || row.class_name.startsWith(pattern + '.')) {
+                  matches.push(row.class_name);
+                  break;
+              }
+          }
+      }
+      return matches;
+  }
+
+  /**
+   * Deletes already-indexed rows that match the given exclude patterns.
+   * Called at the start of `refresh()` so a filter change is honored without a
+   * full re-scan. Prunes from `classes_fts`, `methods`, `inheritance`, and
+   * `resource_classes` (rows whose class matches an exclude).
+   */
+  public pruneExcludedClasses(normalizedExcludes: string[]): number {
+      if (!normalizedExcludes || normalizedExcludes.length === 0) return 0;
+      const matches = this.listClassesMatchingExcludes(normalizedExcludes);
+      if (matches.length === 0) return 0;
+      const db = DB.getInstance();
+      const placeholders = matches.map(() => '?').join(',');
+      let pruned = 0;
+      db.transaction(() => {
+          const ftsRes = db.prepare(`DELETE FROM classes_fts WHERE class_name IN (${placeholders})`).run(...matches);
+          pruned += ftsRes.changes;
+          db.prepare(`DELETE FROM methods WHERE class_name IN (${placeholders})`).run(...matches);
+          db.prepare(`DELETE FROM inheritance WHERE class_name IN (${placeholders})`).run(...matches);
+          db.prepare(`DELETE FROM resource_classes WHERE class_name IN (${placeholders})`).run(...matches);
+          db.prepare(`DELETE FROM call_edges WHERE caller_class IN (${placeholders})`).run(...matches);
+          db.prepare(`DELETE FROM call_edges WHERE callee_class IN (${placeholders})`).run(...matches);
+      });
+      return pruned;
   }
 
   /**
@@ -1604,4 +2121,5 @@ export interface IndexStats {
     resourceCount: number;
     dbPath: string;
     dbSizeBytes: number;
+    skippedByExcludes: number;
 }

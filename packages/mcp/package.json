@@ -1,0 +1,26 @@
+{
+  "name": "maven-indexer-mcp",
+  "version": "1.1.0",
+  "description": "MCP server for indexing the local Maven/Gradle artifact cache",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "maven-indexer-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@maven-indexer/engine": "1.1.0",
+    "@modelcontextprotocol/sdk": "^1.24.3",
+    "zod": "^4.1.13"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "maven-indexer-cli",
+  "version": "1.0.1",
+  "description": "CLI tool for querying the local Maven/Gradle artifact index",
+  "type": "module",
+  "bin": {
+    "maven-indexer-cli": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@maven-indexer/engine": "1.1.0",
+    "commander": "^12.0.0"
+  }
+}
