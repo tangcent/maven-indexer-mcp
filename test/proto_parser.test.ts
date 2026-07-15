@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ProtoParser } from '../src/proto_parser.js';
+import { ProtoParser } from '@maven-indexer/engine';
 
 describe('ProtoParser', () => {
     it('should parse full proto options and definitions', () => {

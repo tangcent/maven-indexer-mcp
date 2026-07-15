@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { execSync } from 'child_process';
-import { DB } from '../src/db/index';
+import { DB } from '@maven-indexer/engine';
 
 /**
  * Verifies that MCP tool handlers set `isError: true` on genuine errors (T5.1).
@@ -52,7 +52,7 @@ describe('MCP tool isError audit (T5.1)', () => {
         // Ensure the compiled server exists.
         execSync('npm run build', { stdio: 'inherit' });
 
-        server = spawn('node', ['build/index.js'], {
+        server = spawn('node', ['packages/mcp/dist/index.js'], {
             stdio: ['pipe', 'pipe', 'inherit'],
             env: {
                 ...process.env,
@@ -60,6 +60,7 @@ describe('MCP tool isError audit (T5.1)', () => {
                 GRADLE_REPO_PATH: path.join(tmpDir, 'no-gradle'),
                 DB_FILE: dbFile,
                 MAVEN_INDEXER_CFR_PATH: path.resolve(__dirname, '..', 'lib', 'cfr-0.152.jar'),
+                MAVEN_INDEXER_MCP_TOOLS: '',
             },
         });
     }, 120000);
@@ -123,7 +124,7 @@ describe('MCP tool isError audit (T5.1)', () => {
         while (Date.now() - start < timeoutMs) {
             try {
                 const res = await sendRequest('tools/call', {
-                    name: 'search_classes',
+                    name: 'search',
                     arguments: { className: 'RealClass' },
                 }, 5000);
                 if (res?.content?.[0]?.text?.includes('com.example.RealClass')) {
@@ -170,7 +171,7 @@ describe('MCP tool isError audit (T5.1)', () => {
 
     it('returns isError:true for get_dependencies on a non-existent coordinate', async () => {
         const res = await sendRequest('tools/call', {
-            name: 'get_dependencies',
+            name: 'dependencies',
             arguments: { coordinate: 'com.nonexistent:does-not-exist:9.9.9' },
         });
         expect(res.isError).toBe(true);
@@ -182,7 +183,7 @@ describe('MCP tool isError audit (T5.1)', () => {
         // but the current implementation marks empty dependents as isError:true.
         // This test asserts the actual implementation behavior.
         const res = await sendRequest('tools/call', {
-            name: 'find_dependents',
+            name: 'dependents',
             arguments: { coordinate: 'com.nonexistent:does-not-exist' },
         });
         expect(res.isError).toBe(true);

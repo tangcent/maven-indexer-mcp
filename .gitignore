@@ -1,5 +1,6 @@
 node_modules/
 build/
+dist/
 maven-index.sqlite
 *.log
 .DS_Store

@@ -15,6 +15,9 @@ export class Config {
   public javaBinary: string = "java";
   public includedPackages: string[] = ["*"];
   public normalizedIncludedPackages: string[] = [];
+  public excludedPackages: string[] = [];
+  public normalizedExcludedPackages: string[] = [];
+  public forceIncludedPackages: string[] = [];
   public cfrPath: string | null = null;
   public versionResolutionStrategy: VersionStrategy = 'semver';
 
@@ -94,7 +97,28 @@ export class Config {
         .map(p => p.trim())
         .filter(p => p.length > 0);
     }
-    this.normalizedIncludedPackages = this.normalizeScanPatterns(this.includedPackages);
+    // Entries ending in `!` are force-includes (override EXCLUDED_PACKAGES).
+    const forceRaw: string[] = [];
+    const includedNoBang: string[] = [];
+    for (const p of this.includedPackages) {
+      if (p.endsWith('!')) {
+        const stripped = p.slice(0, -1);
+        if (stripped.length > 0) forceRaw.push(stripped);
+      } else {
+        includedNoBang.push(p);
+      }
+    }
+    this.includedPackages = includedNoBang.length > 0 ? includedNoBang : this.includedPackages;
+    this.normalizedIncludedPackages = this.normalizeScanPatterns(includedNoBang);
+    this.forceIncludedPackages = this.normalizeScanPatterns(forceRaw);
+
+    // Load Excluded Packages (default empty — preserves current behavior).
+    if (process.env.EXCLUDED_PACKAGES) {
+      this.excludedPackages = process.env.EXCLUDED_PACKAGES.split(',')
+        .map(p => p.trim())
+        .filter(p => p.length > 0);
+    }
+    this.normalizedExcludedPackages = this.normalizeScanPatterns(this.excludedPackages);
 
     // Load CFR Path
     if (process.env.MAVEN_INDEXER_CFR_PATH) {
@@ -136,6 +160,12 @@ export class Config {
     console.error(`Using local repository: ${this.localRepository}`);
     console.error(`Using Java binary: ${this.javaBinary}`);
     console.error(`Included packages: ${JSON.stringify(this.includedPackages)}`);
+    if (this.normalizedExcludedPackages.length > 0) {
+      console.error(`Excluded packages: ${JSON.stringify(this.normalizedExcludedPackages)}`);
+    }
+    if (this.forceIncludedPackages.length > 0) {
+      console.error(`Force-included packages: ${JSON.stringify(this.forceIncludedPackages)}`);
+    }
     if (this.cfrPath) {
         console.error(`Using CFR jar: ${this.cfrPath}`);
     }

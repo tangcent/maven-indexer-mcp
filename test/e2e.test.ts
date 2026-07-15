@@ -3,7 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
-import { DB } from '../src/db/index';
+import { DB } from '@maven-indexer/engine';
 
 const TEST_REPO_DIR = path.resolve('test-repo-e2e');
 const DB_FILE = 'maven-index-e2e.sqlite';
@@ -137,13 +137,14 @@ describe('MCP Server E2E', () => {
         // Build first to ensure we test the built artifact
         execSync('npm run build');
 
-        server = spawn('node', ['build/index.js'], {
+        server = spawn('node', ['packages/mcp/dist/index.js'], {
             stdio: ['pipe', 'pipe', 'inherit'],
             env: { 
                 ...process.env, 
                 MAVEN_REPO_PATH: TEST_REPO_DIR,
                 GRADLE_REPO_PATH: "/non-existent/path/to/disable/gradle",
-                DB_FILE: DB_FILE
+                DB_FILE: DB_FILE,
+                MAVEN_INDEXER_MCP_TOOLS: ''
             }
         });
 
@@ -152,7 +153,7 @@ describe('MCP Server E2E', () => {
 
         // Test 1: Search Classes
         const searchResult = await sendRequest("tools/call", {
-            name: "search_classes",
+            name: "search",
             arguments: { className: "E2EUtils" }
         });
 
@@ -166,8 +167,8 @@ describe('MCP Server E2E', () => {
 
         // Test 2: Get Class Details
         const detailsResult = await sendRequest("tools/call", {
-            name: "get_class_details",
-            arguments: { 
+            name: "get_class",
+            arguments: {
                 className: "com.example.demo.E2EUtils",
                 coordinate: coordinate,
                 type: "source"

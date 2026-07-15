@@ -2,9 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
-import { Indexer } from '../src/indexer';
-import { Config } from '../src/config';
-import { DB } from '../src/db/index';
+import { Indexer, Config, DB } from '@maven-indexer/engine';
 
 const TEST_GRADLE_REPO = path.resolve('test-repo-gradle');
 const DB_FILE = 'maven-index-gradle.sqlite';

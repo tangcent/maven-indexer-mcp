@@ -2,9 +2,7 @@ import {describe, it, expect, beforeAll, afterAll} from 'vitest';
 import path from 'path';
 import fs from 'fs';
 import {execSync} from 'child_process';
-import {Indexer} from '../src/indexer';
-import {Config} from '../src/config';
-import {DB} from '../src/db/index';
+import {Indexer, Config, DB} from '@maven-indexer/engine';
 
 const TEST_REPO_DIR = path.resolve('test-repo-filtering');
 const TEST_GRADLE_DIR = path.resolve('test-gradle-repo-filtering');

@@ -2,11 +2,94 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { Indexer, Artifact, ArtifactInfo, IndexStats } from "./indexer.js";
-import { SourceParser } from "./source_parser.js";
-import { ArtifactResolver } from "./artifact_resolver.js";
-import { resolveMainJar, resolveSourcesJar } from "./path_helpers.js";
-import { DB } from "./db/index.js";
+import { Indexer, Artifact, ArtifactInfo, IndexStats, SourceParser, ArtifactResolver, resolveMainJar, resolveSourcesJar, DB, explore, trimForLlm, renderForLlm, getProjectContext } from '@maven-indexer/engine';
+
+/**
+ * Module 3 — MCP Surface: tool gating.
+ *
+ * By default only `explore` is registered (Req 1.1). The narrow tools are
+ * *defined* (handlers preserved) but only registered when opted in via the
+ * `MAVEN_INDEXER_MCP_TOOLS` env var (Req 2.1–2.6). Design: see
+ * `.spec/maven-indexer-redesign/design.md` §D3.
+ */
+
+/** Closed catalog of short names that MAY be registered (Req 3.4). */
+const CATALOG_NAMES: ReadonlySet<string> = new Set([
+  'explore',
+  'search',
+  'get_class',
+  'get_resource',
+  'implementations',
+  'callers',
+  'callees',
+  'impact',
+  'dependencies',
+  'dependents',
+  'info',
+  'stats',
+  'project_context',
+  'search_artifacts',
+  'search_resources',
+  'search_methods',
+  'list_classes',
+]);
+
+/**
+ * Resolve which short tool names should be registered, per design D3.1.
+ *
+ * - env unset → only `explore` (default)
+ * - env set to a csv of short names → `explore` + exactly that set (filtered
+ *   against the catalog; accepts both `search` and `maven_indexer_search`)
+ * - env set but parses to empty set → `explore` + ALL catalog tools (escape hatch)
+ *
+ * `explore` is ALWAYS included (it is the default tool).
+ */
+function resolveEnabledTools(): Set<string> {
+  const env = process.env.MAVEN_INDEXER_MCP_TOOLS;
+  const enabled = new Set<string>(['explore']);
+
+  if (env === undefined) {
+    return enabled;
+  }
+
+  const requested = env.split(',').map(s => s.trim()).filter(Boolean);
+  if (requested.length === 0) {
+    // Empty-but-set = escape hatch: register all catalog tools.
+    for (const name of CATALOG_NAMES) enabled.add(name);
+    return enabled;
+  }
+
+  for (const raw of requested) {
+    // Accept both short names (`search`) and prefixed names (`maven_indexer_search`).
+    const short = raw.replace(/^maven_indexer_/, '');
+    if (CATALOG_NAMES.has(short)) {
+      enabled.add(short);
+    }
+  }
+  return enabled;
+}
+
+/**
+ * Parses a `className[.methodName]` target string for the call-graph tools.
+ *
+ * Heuristic: Java method names start with a lowercase letter, class names
+ * with an uppercase letter. If the last dot-separated segment starts with
+ * lowercase, it's treated as a method name; otherwise the whole string is
+ * treated as a class name.
+ */
+function parseTarget(target: string): { className: string; methodName: string | undefined } {
+  const lastDotIndex = target.lastIndexOf('.');
+  if (lastDotIndex > 0 && lastDotIndex < target.length - 1) {
+    const lastSegment = target.substring(lastDotIndex + 1);
+    if (lastSegment.length > 0 && lastSegment[0] >= 'a' && lastSegment[0] <= 'z') {
+      return {
+        className: target.substring(0, lastDotIndex),
+        methodName: lastSegment,
+      };
+    }
+  }
+  return { className: target, methodName: undefined };
+}
 
 const healthError = DB.checkHealth();
 if (healthError) {
@@ -42,6 +125,10 @@ If you believe this is a bug, please report it at:
   process.exit(1);
 }
 
+const SERVER_INSTRUCTIONS =
+  "Reach for 'explore' first — ONE call usually answers 'how does this work / where is this used'. " +
+  "The index auto-syncs; pass projectPath (absolute project root) on every call to pin versions to your project's dependencies.";
+
 const server = new McpServer(
   {
     name: "maven-indexer",
@@ -52,6 +139,7 @@ const server = new McpServer(
       tools: {},
       prompts: {},
     },
+    instructions: SERVER_INSTRUCTIONS,
   }
 );
 
@@ -64,8 +152,55 @@ indexer.index().then(() => {
     return indexer.startWatch();
 }).catch(err => console.error("Initial indexing failed:", err));
 
-server.registerTool(
-  "get_class_details",
+// ---------------------------------------------------------------------------
+// Gating: register tools conditionally per MAVEN_INDEXER_MCP_TOOLS (Req 2).
+// `explore` is always registered; the narrow tools only when opted in.
+// ---------------------------------------------------------------------------
+const enabled = resolveEnabledTools();
+
+/**
+ * Registers `name` only if it is in the enabled set. The MCP SDK's
+ * `registerTool` makes a non-registered tool absent from `tools/list` AND
+ * uncallable — satisfying the call-time gate (Req 2.5) implicitly.
+ */
+function maybeRegister(
+  name: string,
+  config: { description?: string; inputSchema?: unknown },
+  handler: (args: any) => Promise<any>,
+): void {
+  if (!enabled.has(name)) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  server.registerTool(name, config as any, handler as any);
+}
+
+// ---------------------------------------------------------------------------
+// PRIMARY TOOL: explore (always registered)
+// ---------------------------------------------------------------------------
+maybeRegister('explore', {
+  description: "PRIMARY TOOL — call FIRST for almost any question about a class, dependency, or call flow in the local Maven/Gradle artifact cache. Returns class source + implementations + callers/callees + call path in ONE capped response. Answers 'how does this work / where is this used' in a single call. projectPath is REQUIRED (MCP servers are launched globally with an unreliable cwd — state the project explicitly to pin versions to your project's dependencies).",
+  inputSchema: z.object({
+    identifiers: z.array(z.string()).describe("Bag of names: class names (FQCN or simple), coordinates (groupId:artifactId[:version]), method targets (Class.method), resource paths. At least one required."),
+    coordinate: z.string().optional().describe("Pin artifact version for all class/method identifiers (groupId:artifactId:version)"),
+    include: z.array(z.enum(['source','signatures','implementations','callers','callees','path','resources','dependencies','dependents'])).optional().describe("Sections to populate. Omit = default (signatures, implementations, callers, callees)."),
+    maxLines: z.number().optional().describe("Line budget (default 200)"),
+    question: z.string().optional().describe("Natural-language question (fallback to search-candidates mode when no identifier resolves)"),
+    projectPath: z.string().describe("REQUIRED: absolute path to the project root. Used to pin version resolution to the project's dependencies."),
+  }),
+}, async (input: any) => {
+  const result = await explore(input);
+  const maxLines = input.maxLines ?? 200;
+  const trimmed = trimForLlm('explore', result, { maxLines });
+  const text = typeof trimmed === 'string'
+    ? trimmed
+    : renderForLlm('explore', result, { maxLines });
+  return { content: [{ type: "text" as const, text }] };
+});
+
+// ---------------------------------------------------------------------------
+// Narrow tools (defined; registered only when opted in via MAVEN_INDEXER_MCP_TOOLS)
+// ---------------------------------------------------------------------------
+
+maybeRegister('get_class',
   {
     description: "Retrieve the source code for a class from the local Maven/Gradle cache (containing internal company libraries). This tool identifies the containing artifact and returns the source code. It prefers actual source files but will fall back to decompilation if necessary. Use this primarily for internal company libraries that are not present in the current workspace. IMPORTANT: Even if the code compiles and imports work, the source code might not be in the current workspace (it comes from a compiled internal library). Use this tool to see the actual implementation of those internal libraries. Supports batch queries.",
     inputSchema: z.object({
@@ -78,7 +213,7 @@ server.registerTool(
   async ({ className, classNames, coordinate, type }) => {
       const resolveOne = async (clsName: string, coord?: string): Promise<{ text: string; isError?: boolean }> => {
 
-          let targetArtifact: import("./indexer.js").Artifact | undefined;
+          let targetArtifact: Artifact | undefined;
           let resolvedClassName = clsName;
 
           if (coord) {
@@ -291,8 +426,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "search_artifacts",
+maybeRegister('search_artifacts',
   {
     description: "Search for internal company artifacts and libraries in the local Maven repository and Gradle caches by coordinate (groupId, artifactId), keyword, or class name. Use this primarily for internal company packages or to find available versions of internal projects that are locally built. Also supports searching third-party libraries in the local cache. Supports batch queries.",
     inputSchema: z.object({
@@ -354,8 +488,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "search_classes",
+maybeRegister('search',
   {
     description: "Search for Java classes in internal company libraries found in the local Maven/Gradle caches. Essential for finding classes in internal company libraries that are not part of the current workspace source code. Use this when you see an import (e.g., 'com.company.util.Helper') but cannot find the definition. Do not assume that because the code compiles or the import exists, the source is local. It often comes from a compiled internal library. This tool helps locate the defining artifact. Supports batch queries.",
     inputSchema: z.object({
@@ -393,8 +526,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "search_implementations",
+maybeRegister('implementations',
   {
     description: "Search for internal implementations of an interface or base class. This is particularly useful for finding implementations of SPIs or base classes within internal company libraries in the local Maven/Gradle cache. Supports batch queries.",
     inputSchema: z.object({
@@ -431,8 +563,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "search_resources",
+maybeRegister('search_resources',
   {
     description: "Search for text resources (non-class files) inside indexed JARs. Supports .properties, .xml, .json, .yaml/.yml, and META-INF/services/* entries up to 64KB. Use 'glob:' prefix for glob patterns, 'regex:' prefix for regex, otherwise substring match on the path.",
     inputSchema: z.object({
@@ -452,8 +583,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "search_methods",
+maybeRegister('search_methods',
   {
     description: "Search for Java methods by name across indexed artifacts in the local Maven/Gradle caches. Returns matching method names with their declaring class and the artifacts that contain them. Requires method indexing to be enabled (INDEX_METHODS=1). Supports batch queries.",
     inputSchema: z.object({
@@ -491,29 +621,122 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "refresh_index",
+maybeRegister('callers',
   {
-    description: "Trigger a re-scan of the Maven repository. Re-indexes all artifacts into shadow tables and atomically swaps on success. Returns an error result if the refresh fails.",
+    description: "List callers (methods that invoke) a class or method from the call-graph index. Target format: 'className' (all methods) or 'className.methodName' (specific method). Requires call-graph indexing (enabled by default; opt out with INDEX_CALL_GRAPH=0).",
+    inputSchema: z.object({
+      target: z.string().describe("Class name (e.g. 'com.example.Foo') or Class.method (e.g. 'com.example.Foo.bar')"),
+      limit: z.number().optional().describe("Maximum number of edges to return (default 50, max 500)"),
+    }),
   },
-  async () => {
-       try {
-           await indexer.refresh();
-           return {
-               content: [{ type: "text", text: "Index refresh complete. All artifacts have been re-indexed." }]
-           };
-       } catch (e) {
-           const message = e instanceof Error ? e.message : String(e);
-           return {
-               isError: true,
-               content: [{ type: "text", text: `Index refresh failed: ${message}` }]
-           };
-       }
-   }
+  async ({ target, limit }) => {
+    const { className, methodName } = parseTarget(target);
+    const edges = indexer.searchCallers(className, methodName, limit ?? 50);
+    const callGraphAvailable = indexer.isCallGraphAvailable();
+
+    if (!callGraphAvailable) {
+      return {
+        content: [{ type: "text", text: `Call-graph index is empty (INDEX_CALL_GRAPH=0 or no artifacts indexed). No callers for ${target}.` }],
+      };
+    }
+
+    if (edges.length === 0) {
+      return {
+        content: [{ type: "text", text: `No callers found for ${target}.` }],
+      };
+    }
+
+    const text = edges.map(edge => {
+      const desc = edge.methodDescriptor ? ` ${edge.methodDescriptor}` : '';
+      const resolved = edge.resolved ? '' : ' [unresolved]';
+      const sites = edge.sites > 1 ? ` (${edge.sites} sites)` : '';
+      const arts = edge.artifacts.length > 0
+        ? edge.artifacts.slice(0, 3).map(a => `    ${a.groupId}:${a.artifactId}:${a.version}`).join('\n')
+        : '    (no indexed artifact)';
+      const more = edge.artifacts.length > 3 ? `\n    ... (${edge.artifacts.length - 3} more)` : '';
+      return `Caller: ${edge.className}.${edge.methodName}${desc} [${edge.invokeKind}]${resolved}${sites}\n${arts}${more}`;
+    }).join('\n\n');
+
+    return { content: [{ type: "text", text }] };
+  }
 );
 
-server.registerTool(
-  "info",
+maybeRegister('callees',
+  {
+    description: "List callees (methods invoked by) a class or method from the call-graph index. Target format: 'className' (all methods) or 'className.methodName' (specific method). Requires call-graph indexing (enabled by default; opt out with INDEX_CALL_GRAPH=0).",
+    inputSchema: z.object({
+      target: z.string().describe("Class name (e.g. 'com.example.Foo') or Class.method (e.g. 'com.example.Foo.bar')"),
+      limit: z.number().optional().describe("Maximum number of edges to return (default 50, max 500)"),
+    }),
+  },
+  async ({ target, limit }) => {
+    const { className, methodName } = parseTarget(target);
+    const edges = indexer.searchCallees(className, methodName, limit ?? 50);
+    const callGraphAvailable = indexer.isCallGraphAvailable();
+
+    if (!callGraphAvailable) {
+      return {
+        content: [{ type: "text", text: `Call-graph index is empty (INDEX_CALL_GRAPH=0 or no artifacts indexed). No callees for ${target}.` }],
+      };
+    }
+
+    if (edges.length === 0) {
+      return {
+        content: [{ type: "text", text: `No callees found for ${target}.` }],
+      };
+    }
+
+    const text = edges.map(edge => {
+      const desc = edge.methodDescriptor ? ` ${edge.methodDescriptor}` : '';
+      const resolved = edge.resolved ? '' : ' [unresolved]';
+      const sites = edge.sites > 1 ? ` (${edge.sites} sites)` : '';
+      const arts = edge.artifacts.length > 0
+        ? edge.artifacts.slice(0, 3).map(a => `    ${a.groupId}:${a.artifactId}:${a.version}`).join('\n')
+        : '    (no indexed artifact)';
+      const more = edge.artifacts.length > 3 ? `\n    ... (${edge.artifacts.length - 3} more)` : '';
+      return `Callee: ${edge.className}.${edge.methodName}${desc} [${edge.invokeKind}]${resolved}${sites}\n${arts}${more}`;
+    }).join('\n\n');
+
+    return { content: [{ type: "text", text }] };
+  }
+);
+
+maybeRegister('impact',
+  {
+    description: "Show the transitive impact (callers-of-callers) of a class or method via BFS up to a depth cap. Useful for assessing blast radius of a change. Target format: 'className' or 'className.methodName'. Requires call-graph indexing.",
+    inputSchema: z.object({
+      target: z.string().describe("Class name (e.g. 'com.example.Foo') or Class.method (e.g. 'com.example.Foo.bar')"),
+      depth: z.number().optional().describe("Maximum traversal depth (default 3, max 5)"),
+      maxNodes: z.number().optional().describe("Maximum nodes to return (default 200, max 1000)"),
+    }),
+  },
+  async ({ target, depth, maxNodes }) => {
+    const { className, methodName } = parseTarget(target);
+    const result = indexer.impact(className, methodName, { depth, maxNodes });
+
+    if (!result.callGraphAvailable) {
+      return {
+        content: [{ type: "text", text: `Call-graph index is empty (INDEX_CALL_GRAPH=0 or no artifacts indexed). No impact for ${target}.` }],
+      };
+    }
+
+    if (result.nodes.length === 0) {
+      return {
+        content: [{ type: "text", text: `No impact (transitive callers) found for ${target}.` }],
+      };
+    }
+
+    const header = `Impact of ${target} (${result.nodes.length} nodes, depth ${result.maxDepth}, max ${result.maxNodes})${result.truncated > 0 ? `, truncated ${result.truncated}` : ''}:`;
+    const lines = result.nodes.map(node => {
+      const label = node.methodName ? `${node.className}.${node.methodName}` : node.className;
+      const cycle = node.cycle ? ' [cycle]' : '';
+      return `  [d${node.depth}] ${label}${cycle}  via  ${node.path.join(' -> ')}`;
+    });
+    return { content: [{ type: "text", text: [header, ...lines].join('\n') }] };
+  }
+);
+
+maybeRegister('info',
   {
     description: "Get detailed info about one or more artifacts matching a Maven coordinate. Returns the artifact path, layout, hasSource flag, indexed class count, indexed resource count, and whether the main JAR file still exists on disk. If version is omitted, returns info for every known version of the artifact.",
     inputSchema: z.object({
@@ -549,15 +772,14 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "stats",
+maybeRegister('stats',
   {
     description: "Return aggregate statistics about the local Maven/Gradle index: total artifact count, indexed class count, indexed resource count, the SQLite DB file path and size in bytes, and the last-indexed timestamp (ISO string). Useful for sanity-checking index health and freshness.",
     inputSchema: z.object({}),
   },
   async () => {
       const stats: IndexStats = indexer.getStats();
-      const text = [
+      const lines = [
           '### Index Statistics',
           `- DB Path: ${stats.dbPath}`,
           `- DB Size: ${stats.dbSizeBytes} bytes`,
@@ -565,13 +787,16 @@ server.registerTool(
           `- Artifact Count: ${stats.artifactCount}`,
           `- Class Count: ${stats.classCount}`,
           `- Resource Count: ${stats.resourceCount}`,
-      ].join('\n');
+      ];
+      if (stats.skippedByExcludes && stats.skippedByExcludes > 0) {
+          lines.push(`- Skipped By Excludes: ${stats.skippedByExcludes}`);
+      }
+      const text = lines.join('\n');
       return { content: [{ type: "text", text }] };
   }
 );
 
-server.registerTool(
-  "list_classes",
+maybeRegister('list_classes',
   {
     description: "List all distinct Java/protobuf class names indexed for a specific Maven artifact coordinate. Useful for inspecting what classes an internal company library exposes. The coordinate MUST include the version.",
     inputSchema: z.object({
@@ -595,8 +820,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "get_resource",
+maybeRegister('get_resource',
   {
     description: "Retrieve the content of a single indexed text resource (proto file, XML, properties, JSON, YAML, META-INF/services/*) inside an artifact JAR. The coordinate MUST include the version. Returns the resource content, type label, and path. Resources larger than 64KB are not stored and will report as not found.",
     inputSchema: z.object({
@@ -622,8 +846,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "get_dependencies",
+maybeRegister('dependencies',
   {
     description: "Return the parsed Maven `<dependencies>` of an artifact (groupId:artifactId:version). Each entry includes groupId, artifactId, version (empty string when the POM omits it), scope (defaults to 'compile'), and the optional flag. Useful for understanding what an internal company library transitively pulls in. Requires the full coordinate including version.",
     inputSchema: z.object({
@@ -651,8 +874,7 @@ server.registerTool(
   }
 );
 
-server.registerTool(
-  "find_dependents",
+maybeRegister('dependents',
   {
     description: "Find indexed artifacts that declare a dependency on the given coordinate. Matching is by groupId:artifactId only — version is optional in the input. Returns each dependent artifact's full coordinate and the declared scope (defaults to 'compile'). Useful for impact analysis when changing an internal library.",
     inputSchema: z.object({
@@ -677,6 +899,20 @@ server.registerTool(
       return { content: [{ type: "text", text }] };
   }
 );
+
+// ---------------------------------------------------------------------------
+// project_context (Module 8) — inspect the active project's build + dependency
+// tree. Useful when version resolution surprises you (Req 6.3).
+// ---------------------------------------------------------------------------
+maybeRegister('project_context', {
+  description: "Inspect the active project's Maven/Gradle context (declared and resolved dependency tree, build file, project coordinate). Useful when version resolution surprises you.",
+  inputSchema: z.object({
+    projectPath: z.string().describe("REQUIRED: absolute path to the project root."),
+  }),
+}, async ({ projectPath }: { projectPath: string }) => {
+  const ctx = await getProjectContext(projectPath);
+  return { content: [{ type: "text" as const, text: JSON.stringify(ctx, null, 2) }] };
+});
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

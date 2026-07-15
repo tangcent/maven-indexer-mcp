@@ -1,9 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import path from 'path';
 import fs from 'fs';
-import { Config } from '../src/config';
-import { ArtifactResolver } from '../src/artifact_resolver';
-import { Artifact } from '../src/indexer';
+import { Config, ArtifactResolver, Artifact } from '@maven-indexer/engine';
 
 const TEST_DIR = path.resolve('test-strategy');
 

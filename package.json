@@ -1,59 +1,23 @@
 {
-  "name": "maven-indexer-mcp",
+  "name": "maven-index",
   "version": "1.1.0",
-  "description": "MCP server for indexing local Maven repository",
-  "main": "build/index.js",
+  "private": true,
+  "description": "Unified engine + CLI + MCP server over the local JVM artifact cache (renamed from maven-indexer-mcp)",
   "type": "module",
-  "bin": {
-    "maven-indexer-mcp": "build/index.js"
-  },
-  "files": [
-    "build",
-    "lib",
-    "README.md",
-    "LICENSE"
+  "workspaces": [
+    "packages/*"
   ],
-  "directories": {
-    "doc": "doc"
-  },
   "scripts": {
-    "build": "tsc",
-    "watch": "tsc --watch",
-    "start": "node build/index.js",
-    "test": "vitest run",
-    "prepublishOnly": "npm run build"
+    "build": "npm run build --workspace=@maven-indexer/engine && npm run build --workspace=maven-indexer-mcp && npm run build --workspace=maven-indexer-cli",
+    "test": "vitest run"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/tangcent/maven-indexer-mcp.git"
-  },
-  "keywords": [
-    "mcp",
-    "maven",
-    "index"
-  ],
-  "author": "",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/tangcent/maven-indexer-mcp/issues"
-  },
-  "homepage": "https://github.com/tangcent/maven-indexer-mcp#readme",
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.0.2",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.15"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.24.3",
     "@types/semver": "^7.7.1",
     "@types/xml2js": "^0.4.14",
     "@types/yauzl": "^2.10.3",
-    "better-sqlite3": "^12.5.0",
-    "chokidar": "^5.0.0",
-    "semver": "^7.7.3",
-    "xml2js": "^0.6.2",
-    "yauzl": "^3.2.0",
-    "zod": "^4.1.13"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.15"
   }
 }
