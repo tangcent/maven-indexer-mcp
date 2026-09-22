@@ -14,13 +14,20 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node ../../scripts/bundle-package.mjs packages/mcp src/index.ts",
     "start": "node dist/index.js",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@maven-indexer/engine": "1.1.0",
     "@modelcontextprotocol/sdk": "^1.24.3",
+    "better-sqlite3": "^12.5.0",
+    "chokidar": "^5.0.0",
+    "semver": "^7.7.3",
+    "xml2js": "^0.6.2",
+    "yauzl": "^3.2.0",
     "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@maven-indexer/engine": "1.1.0"
   }
 }

@@ -1,11 +1,18 @@
 #!/bin/bash
 set -e
 
+# Publishable workspaces, in dependency order.
+# NOTE: the repository root is `private: true` — publishing it would fail
+# (and/or publish the wrong thing). Always target the workspaces explicitly.
+WORKSPACES=("maven-indexer-cli" "maven-indexer-mcp")
+
 # Function definitions
 publish_npm() {
     echo "🚀 Publishing to npmjs.com..."
-    # Defaults to public npm registry with package name "maven-indexer-mcp"
-    npm publish --access public
+    for ws in "${WORKSPACES[@]}"; do
+        echo "   📦 $ws"
+        npm publish --workspace="$ws" --access public
+    done
 }
 
 publish_github() {
@@ -40,17 +47,32 @@ publish_github() {
         fi
     fi
     
-    # 1. Backup package.json
-    cp package.json package.json.bak
-    
-    # 2. Update name to scoped version for GitHub
-    # We use a temp node script to reliably update the JSON
-    node -e "
-    const fs = require('fs');
-    const pkg = require('./package.json');
-    pkg.name = '@tangcent/maven-indexer-mcp';
-    fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-    "
+    # 1. Backup the workspace package.json files
+    local LOCATIONS=()
+    for ws in "${WORKSPACES[@]}"; do
+        # Resolve the directory from the package name (mirrors the workspaces glob).
+        loc=$(node -e "
+        const fs = require('fs');
+        for (const dir of fs.readdirSync('packages')) {
+            const p = JSON.parse(fs.readFileSync('packages/' + dir + '/package.json', 'utf-8'));
+            if (p.name === process.argv[1]) { console.log('packages/' + dir); break; }
+        }
+        " "$ws")
+        [ -z "$loc" ] && { echo "❌ Cannot locate workspace $ws"; exit 1; }
+        cp "$loc/package.json" "$loc/package.json.bak"
+        LOCATIONS+=("$loc")
+    done
+
+    # 2. Update names to the scoped versions required by GitHub Packages
+    for loc in "${LOCATIONS[@]}"; do
+        node -e "
+        const fs = require('fs');
+        const file = process.argv[1] + '/package.json';
+        const pkg = JSON.parse(fs.readFileSync(file, 'utf-8'));
+        pkg.name = '@tangcent/' + pkg.name;
+        fs.writeFileSync(file, JSON.stringify(pkg, null, 2));
+        " "$loc"
+    done
     
     # 3. Handle .npmrc for GitHub auth
     if [ -f .github/.npmrc ]; then
@@ -62,12 +84,17 @@ publish_github() {
     # Cleanup function
     cleanup() {
         rm -f .npmrc
-        mv package.json.bak package.json
+        for loc in "${LOCATIONS[@]}"; do
+            [ -f "$loc/package.json.bak" ] && mv "$loc/package.json.bak" "$loc/package.json"
+        done
     }
     trap cleanup EXIT
 
     # 4. Publish
-    npm publish --registry=https://npm.pkg.github.com
+    for ws in "${WORKSPACES[@]}"; do
+        echo "   📦 $ws"
+        npm publish --workspace="$ws" --registry=https://npm.pkg.github.com
+    done
     
     # Cleanup happens automatically via trap
     cleanup
