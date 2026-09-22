@@ -9,14 +9,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./watcher": {
-      "types": "./dist/watcher.d.ts",
-      "default": "./dist/watcher.js"
-    },
-    "./tool_catalog": {
-      "types": "./dist/tool_catalog.d.ts",
-      "default": "./dist/tool_catalog.js"
     }
   },
   "scripts": {

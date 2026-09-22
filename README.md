@@ -28,6 +28,33 @@ Add the following config to your MCP client:
 This will automatically download and run the latest version of the server. It will auto-detect your Maven repository
 location (usually `~/.m2/repository`) and Gradle cache.
 
+## Upgrading from maven-indexer-mcp 1.0.x
+
+> **Breaking change:** tool names changed, and **only `explore` is registered by default**.
+
+After upgrading, agents that call the old names get "tool not found" until you opt back in:
+
+| 1.0.x tool | Now |
+|---|---|
+| `get_class_details` | `get_class` |
+| `search_classes` | `search` |
+| `search_artifacts` | `search_artifacts` |
+| `search_implementations` | `implementations` |
+| `refresh_index` | *removed* (the index auto-syncs; use `maven-indexer-cli refresh-index`) |
+| everything else | same name, but **not registered by default** |
+
+To restore the full surface, set:
+
+```bash
+MAVEN_INDEXER_MCP_TOOLS=   # empty-but-set enables ALL tools
+```
+
+or list the ones you want: `MAVEN_INDEXER_MCP_TOOLS=search,get_class,callers`.
+
+Everything else is unchanged — the published package name is still
+`maven-indexer-mcp` (the *repository* was renamed to `maven-index`), and the CLI
+runs through the `maven-indexer-cli` binary.
+
 ### CLI alternative
 
 Install globally for direct terminal usage:
@@ -36,7 +63,7 @@ Install globally for direct terminal usage:
 npm install -g maven-indexer-cli
 ```
 
-Then use `maven-indexer explore ...` or any of the CLI commands directly.
+Then use `maven-indexer-cli explore ...` or any of the CLI commands directly.
 
 ### MCP Client configuration
 

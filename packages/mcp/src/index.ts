@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -10,7 +11,7 @@ import { Indexer, Artifact, ArtifactInfo, IndexStats, SourceParser, ArtifactReso
  * By default only `explore` is registered (Req 1.1). The narrow tools are
  * *defined* (handlers preserved) but only registered when opted in via the
  * `MAVEN_INDEXER_MCP_TOOLS` env var (Req 2.1–2.6). Design: see
- * `.spec/maven-indexer-redesign/design.md` §D3.
+ * Set `MAVEN_INDEXER_MCP_TOOLS` to opt into the narrow tools.
  */
 
 /** Closed catalog of short names that MAY be registered (Req 3.4). */
@@ -129,10 +130,24 @@ const SERVER_INSTRUCTIONS =
   "Reach for 'explore' first — ONE call usually answers 'how does this work / where is this used'. " +
   "The index auto-syncs; pass projectPath (absolute project root) on every call to pin versions to your project's dependencies.";
 
+/**
+ * Advertises the installed package version instead of a hardcoded constant,
+ * so agents can tell which release they are talking to. Resolved relative to
+ * this module (works for both the bundled `dist/index.js` and `src/index.ts`).
+ */
+function readVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+    return (pkg.version as string) ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
 const server = new McpServer(
   {
     name: "maven-indexer",
-    version: "1.0.0",
+    version: readVersion(),
   },
   {
     capabilities: {

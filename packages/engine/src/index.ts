@@ -24,7 +24,5 @@ export * from './llm_format.js';
 export * from './output.js';
 export { explore } from './explore.js';
 export type { ExploreInput, ExploreResult, ClassEntry, EdgeEntry, PathStep, ResourceEntry, DepEntry, IncludeSection } from './explore.js';
-export { detectDependencies } from './project_detector.js';
-export type { Dependency as ProjectDependency } from './project_detector.js';
 export { getProjectContext } from './project_context.js';
 export type { ProjectContext, ProjectCoordinate, ProjectDep, ResolvedTree } from './project_context.js';

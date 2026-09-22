@@ -1,11 +1,9 @@
-import { DB } from '@maven-indexer/engine';
-import { Indexer, Artifact, CallEdgeResult } from '@maven-indexer/engine';
-import { SourceParser } from '@maven-indexer/engine';
-import { ArtifactResolver } from '@maven-indexer/engine';
-import { resolveMainJar } from '@maven-indexer/engine';
+import {
+  Indexer, Artifact, CallEdgeResult, SourceParser, ArtifactResolver,
+  resolveMainJar, print, resolve as smartResolve, DB,
+} from '@maven-indexer/engine';
+import type { TraceResult, TraceClassResult, TraceNeighborResult, TraceCallEdgeResult } from '@maven-indexer/engine';
 import { GlobalOpts, resolveDbPath, assertIndexNotEmpty } from './shared.js';
-import { print } from '@maven-indexer/engine';
-import { resolve as smartResolve } from '@maven-indexer/engine';
 
 /**
  * `trace` — composed, capped view of a class and its immediate neighbors.
@@ -18,42 +16,6 @@ import { resolve as smartResolve } from '@maven-indexer/engine';
  *   - `callees`      — direct callee methods from the call graph (capped, empty if no CG)
  *   - `_meta`        — status, callGraphAvailable, per-section truncation counts
  */
-
-export interface TraceClassResult {
-    className: string;
-    artifact: string; // "g:a:v"
-    signatures: string[];
-}
-
-export interface TraceNeighborResult {
-    className: string;
-    artifact: string; // "g:a:v"
-}
-
-export interface TraceCallEdgeResult {
-    className: string;
-    methodName: string;
-    artifact: string; // "g:a:v" or ""
-    sites: number;
-}
-
-export interface TraceMeta {
-    status: 'found' | 'not_found';
-    callGraphAvailable: boolean;
-    truncated: {
-        implementations: number;
-        callers: number;
-        callees: number;
-    };
-}
-
-export interface TraceResult {
-    class: TraceClassResult | null;
-    implementations: TraceNeighborResult[];
-    callers: TraceCallEdgeResult[];
-    callees: TraceCallEdgeResult[];
-    _meta: TraceMeta;
-}
 
 export interface TraceOpts extends GlobalOpts {
     coordinate?: string;

@@ -1457,14 +1457,6 @@ export class Indexer {
     public searchImplementations(className: string, limit: number = 100): { className: string, artifacts: Artifact[] }[] {
         const db = DB.getInstance();
         try {
-            console.error(`Searching implementations for ${className}...`);
-
-            // Debug: Check if we have any inheritance data at all
-            const count = db.prepare("SELECT count(*) as c FROM inheritance").get() as { c: number };
-            if (count.c === 0) {
-                console.error("WARNING: Inheritance table is empty!");
-            }
-
             // Recursive search for all implementations/subclasses.
             // depth cap (20) prevents runaway recursion on cyclic hierarchies.
             const rows = db.prepare(`
@@ -1482,16 +1474,6 @@ export class Indexer {
                 FROM hierarchy h
                          JOIN artifacts a ON h.artifact_id = a.id LIMIT ?
             `).all(className, limit) as ClassRow[];
-
-            console.error(`Searching implementations for ${className}: found ${rows.length} rows.`);
-
-            if (rows.length === 0) {
-                // Fallback: Try searching without recursion to see if direct children exist
-                const direct = db.prepare('SELECT count(*) as c FROM inheritance WHERE parent_class_name = ?').get(className) as {
-                    c: number
-                };
-                console.error(`Direct implementations check for ${className}: ${direct.c}`);
-            }
 
             return this.groupByArtifact(rows);
 

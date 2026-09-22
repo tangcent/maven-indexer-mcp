@@ -59,7 +59,7 @@ describe('MCP tool isError audit (T5.1)', () => {
                 MAVEN_REPO_PATH: repoDir,
                 GRADLE_REPO_PATH: path.join(tmpDir, 'no-gradle'),
                 DB_FILE: dbFile,
-                MAVEN_INDEXER_CFR_PATH: path.resolve(__dirname, '..', 'lib', 'cfr-0.152.jar'),
+                MAVEN_INDEXER_CFR_PATH: path.resolve(__dirname, '..', 'packages', 'engine', 'lib', 'cfr-0.152.jar'),
                 MAVEN_INDEXER_MCP_TOOLS: '',
             },
         });
