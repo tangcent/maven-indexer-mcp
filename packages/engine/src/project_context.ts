@@ -9,8 +9,8 @@
  * view once ready. Results are cached in-memory and in a sidecar JSON file,
  * keyed by build-file mtime.
  *
- * Design: see `.spec/maven-indexer-redesign/design.md` §D8.
- * Requirements: see `.spec/maven-indexer-redesign/requirements-project-context.md`.
+ * Behavior contract: see `test/project_context.test.ts`.
+ * Build/publish flows: see `doc/development_guide.md`.
  */
 
 import fs from 'fs';
@@ -62,6 +62,12 @@ export interface ProjectContext {
 const SIDECAR_DIR = path.join(os.homedir(), '.maven-indexer-mcp', 'projects');
 const RESOLVE_TIMEOUT_MS = 60_000;
 const BACKOFF_MS = 10 * 60 * 1000; // 10 minutes
+/**
+ * Cap for the raw dependency-tree output kept in memory and in the sidecar.
+ * `mvn dependency:tree` on a large multi-module build can emit tens of MB;
+ * keeping it all would bloat the sidecar JSON and the hot-path memory cache.
+ */
+const MAX_RAW_TEXT_CHARS = 200_000;
 
 const BUILD_FILES: ReadonlyArray<{ name: string; kind: 'maven' | 'gradle' }> = [
   { name: 'pom.xml', kind: 'maven' },
@@ -316,8 +322,8 @@ function parseDependencyTreeOutput(output: string, kind: 'maven' | 'gradle'): Pr
   for (const rawLine of output.split('\n')) {
     // Strip [INFO]/[WARNING]/[ERROR] prefixes (Maven)
     let line = rawLine.replace(/^\s*\[[A-Z]+\]\s*/, '');
-    // Strip tree-drawing characters (+- | \- etc.)
-    line = line.replace(/^[+\-| \\t]+/, '').trim();
+    // Strip tree-drawing characters (+- | \ and tabs).
+    line = line.replace(/^[+\-| \t]+/, '').trim();
     if (!line) continue;
 
     // Handle Gradle version mediation: "g:a:v -> v2" (resolved version is v2)
@@ -428,7 +434,10 @@ function maybeKickOffResolution(
   const promise = runDependencyTree(buildFile, kind)
     .then((result) => {
       if (result.success) {
-        ctx.resolved = { coordinates: result.coordinates, rawText: result.rawText };
+        ctx.resolved = {
+          coordinates: result.coordinates,
+          rawText: truncateRawText(result.rawText),
+        };
         ctx.tree = 'resolved';
         ctx.resolveError = undefined;
       } else {
@@ -469,22 +478,22 @@ async function runDependencyTree(
 
   let cmd: string;
   let args: string[];
+  let executableHint: string; // used in error messages
 
   if (kind === 'maven') {
     cmd = 'mvn';
     args = ['dependency:tree', '-DoutputType=text'];
+    executableHint = 'mvn';
   } else {
-    const gradlewPath = path.join(cwd, 'gradlew');
-    try {
-      if (fs.existsSync(gradlewPath)) {
-        cmd = gradlewPath;
-        // Ensure executable (Windows may need .bat, but on macOS/Linux chmod)
-        try { fs.chmodSync(cmd, 0o755); } catch { /* ignore */ }
-      } else {
-        cmd = 'gradle';
-      }
-    } catch {
+    // On Windows the wrapper is `gradlew.bat`; POSIX uses `gradlew`.
+    const wrapperName = process.platform === 'win32' ? 'gradlew.bat' : 'gradlew';
+    const gradlewPath = path.join(cwd, wrapperName);
+    if (fs.existsSync(gradlewPath)) {
+      cmd = gradlewPath;
+      executableHint = wrapperName;
+    } else {
       cmd = 'gradle';
+      executableHint = 'gradle';
     }
     args = ['dependencies'];
   }
@@ -494,7 +503,7 @@ async function runDependencyTree(
     if (result.exitCode !== 0) {
       return {
         success: false,
-        error: `${cmd} exited with code ${result.exitCode}${
+        error: `${executableHint} exited with code ${result.exitCode}${
           result.stderr ? ': ' + result.stderr.slice(0, 500) : ''
         }`,
         rawText: result.stdout + '\n' + result.stderr,
@@ -510,7 +519,7 @@ async function runDependencyTree(
     const msg = err instanceof Error ? err.message : String(err);
     return {
       success: false,
-      error: `Failed to run ${cmd}: ${msg}`,
+      error: `Failed to run ${executableHint}: ${msg}`,
       rawText: '',
     };
   }
@@ -526,10 +535,16 @@ function spawnWithTimeout(
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
+      // Windows note: `mvn`/`gradle` are batch wrappers (mvn.cmd / gradlew.bat).
+      // Node cannot spawn those directly (ENOENT) without going through cmd.exe.
+      // `cmd` and `args` here are fixed constants (no user input), so enabling
+      // the shell introduces no injection surface.
+      const isWindows = process.platform === 'win32';
       child = spawn(cmd, args, {
         cwd,
         detached: false,
         stdio: ['ignore', 'pipe', 'pipe'],
+        ...(isWindows ? { shell: true } : {}),
       });
     } catch (err) {
       reject(err);
@@ -588,6 +603,18 @@ async function readSidecar(buildFile: string, expectedMtime: number): Promise<Pr
   } catch {
     return null;
   }
+}
+
+/**
+ * Truncates a (possibly huge) build-tool output to `MAX_RAW_TEXT_CHARS`,
+ * appending a marker so debuggers can tell the output was cut.
+ */
+function truncateRawText(raw: string): string {
+  if (raw.length <= MAX_RAW_TEXT_CHARS) return raw;
+  return (
+    raw.slice(0, MAX_RAW_TEXT_CHARS) +
+    `\n... (truncated ${raw.length - MAX_RAW_TEXT_CHARS} chars, raw output exceeds ${MAX_RAW_TEXT_CHARS} chars)`
+  );
 }
 
 /** Atomically writes the sidecar cache (write to temp file then rename). */

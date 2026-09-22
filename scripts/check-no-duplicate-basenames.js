@@ -22,11 +22,12 @@
  */
 
 import { readdirSync, statSync } from 'node:fs';
-import { join, basename, relative } from 'node:path';
+import { join, basename, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = __filename.substring(0, __filename.lastIndexOf('/'));
+// `dirname()` instead of `lastIndexOf('/')` — Windows paths never contain '/'.
+const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
 
 const PACKAGES_DIR = join(ROOT, 'packages');
