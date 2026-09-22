@@ -73,6 +73,7 @@ const LLM_SUPPORTED: Set<string> = new Set<string>([
   'find-dependents',
   'get-dependencies',
   'trace',
+  'explore',
 ]);
 
 export interface PrintOpts {

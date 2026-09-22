@@ -217,7 +217,8 @@ export function trimForLlm(command: CommandShape, rows: unknown, opts: { maxLine
     }
 
     case 'explore': {
-      // ExploreResult is a composed object; trimming is by line budget in renderForLlm.
+      // ExploreResult is a composed object. `explore()` already applies the line
+      // budget to the payload itself, so JSON and text output are capped alike.
       return rows;
     }
 
