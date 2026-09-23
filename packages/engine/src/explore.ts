@@ -196,12 +196,17 @@ function hasPinningData(ctx?: ProjectContext): boolean {
 /**
  * Project pinning (D8.3 / Req 3): if a project context is active, prefer
  * artifacts whose `groupId:artifactId` appears in the project's dependency tree.
- * The resolved-tree version wins over the declared-tree version (Req 3.2);
- * if no exact version match, prefer a source-bearing artifact among matches.
+ * The resolved-tree version wins over the declared-tree version (Req 3.2).
+ *
+ * `searchClass` collapses versions per groupId:artifactId, so the version the
+ * project actually declares is often absent from `artifacts`. `lookupExact`
+ * lets us ask the index for that exact `g:a:v` instead of silently settling for
+ * whatever version happened to survive de-duplication.
  */
 function pickProjectArtifact(
   artifacts: Artifact[],
   projectContext?: ProjectContext,
+  lookupExact?: (groupId: string, artifactId: string, version: string) => Artifact | undefined,
 ): Artifact | undefined {
   if (!hasPinningData(projectContext) || !projectContext) return undefined;
 
@@ -249,6 +254,20 @@ function pickProjectArtifact(
       return a;
     }
   }
+
+  // Only fall back to "whatever version we found" when the tree's own version
+  // is genuinely unavailable in the index.
+  const fromTree = (map: Map<string, string>): Artifact | undefined => {
+    if (!lookupExact) return undefined;
+    for (const [key, version] of map) {
+      const [g, a] = key.split(':');
+      const exact = lookupExact(g, a, version);
+      if (exact) return exact;
+    }
+    return undefined;
+  };
+  const treeArtifact = fromTree(resolvedMap) ?? fromTree(declaredMap);
+  if (treeArtifact) return treeArtifact;
 
   // No exact version match — prefer source among matching, else first match
   const withSource = matching.filter(a => a.hasSource);
@@ -541,7 +560,11 @@ export async function explore(input: ExploreInput): Promise<ExploreResult> {
     // Render candidates as class entries with no source
     for (const [clsName, arts] of candidates) {
       // Apply project pinning in search mode too (D8.3)
-      const pinned = pickProjectArtifact(arts, projectCtx);
+      const pinned = pickProjectArtifact(
+        arts,
+        projectCtx,
+        (g, a, v) => indexer.getArtifactByCoordinate(g, a, v),
+      );
       const bestArt = pinned ?? await ArtifactResolver.resolveBestArtifact(arts);
       classes.push({
         className: clsName,
@@ -725,6 +748,26 @@ function applyLineBudget(result: ExploreResult, maxLines: number): void {
 // Class entry resolution
 // ---------------------------------------------------------------------------
 
+type ResolvePolicy = 'explicit' | 'project-pinned' | 'cache-wide';
+
+/**
+ * Tries one artifact; returns null when the class isn't actually readable from
+ * it, so the caller can fall through to the next candidate instead of handing
+ * back a pinned-but-empty entry.
+ */
+async function tryResolve(
+  artifact: Artifact | undefined,
+  resolvedName: string,
+  displayName: string,
+  wantsSource: boolean,
+  wantsSignatures: boolean,
+  policy: ResolvePolicy,
+): Promise<{ entry: ClassEntry; policy: ResolvePolicy } | null> {
+  if (!artifact) return null;
+  const entry = await resolveClassDetail(artifact, resolvedName, displayName, wantsSource, wantsSignatures);
+  return entry ? { entry, policy } : null;
+}
+
 async function resolveClassEntry(
   indexer: Indexer,
   clsName: string,
@@ -733,73 +776,71 @@ async function resolveClassEntry(
   wantsSignatures: boolean,
   projectContext?: ProjectContext,
   pins: CoordinatePin[] = [],
-): Promise<{ entry: ClassEntry; policy: 'explicit' | 'project-pinned' | 'cache-wide' } | null> {
-  let artifact: Artifact | undefined = pinnedArtifact;
-  // Policy: 'explicit' when the user pinned an artifact, 'project-pinned' when
-  // matched against the project tree, 'cache-wide' as the fallback heuristic.
-  let policy: 'explicit' | 'project-pinned' | 'cache-wide' = pinnedArtifact ? 'explicit' : 'cache-wide';
-
-  if (!artifact) {
-    // Search for the class
-    const matches = indexer.searchClass(clsName);
-    const exactMatch = matches.find(m => m.className === clsName);
-
-    if (exactMatch) {
-      // An exact `g:a:v` pin is authoritative. It is tried *before* the
-      // candidate list because `searchClass` collapses versions per
-      // groupId:artifactId — the pinned version may not even appear there.
-      // If the class isn't actually inside that artifact, fall through to the
-      // normal resolution instead of failing.
-      const exactPin = pins.find(p => p.artifact);
-      if (exactPin?.artifact) {
-        const pinnedEntry = await resolveClassDetail(
-          exactPin.artifact, clsName, clsName, wantsSource, wantsSignatures,
-        );
-        if (pinnedEntry) return { entry: pinnedEntry, policy: 'explicit' };
-      }
-
-      // Project pinning (D8.3): prefer artifacts in the project's dependency tree.
-      const pinned = pickProjectArtifact(exactMatch.artifacts, projectContext);
-      if (pinned) {
-        artifact = pinned;
-        policy = 'project-pinned';
-      } else {
-        artifact = await ArtifactResolver.resolveBestArtifact(exactMatch.artifacts);
-        policy = 'cache-wide';
-      }
-    } else {
-      // Try inner class resolution: com.pkg.Outer.Inner -> com.pkg.Outer$Inner
-      const parts = clsName.split('.');
-      for (let i = parts.length - 1; i > 0; i--) {
-        const candidate = parts.slice(0, i).join('.');
-        const candidateMatches = indexer.searchClass(candidate);
-        const candidateExact = candidateMatches.find(m => m.className === candidate);
-        if (candidateExact) {
-          const pinnedByCoord = pickPinnedArtifact(candidateExact.artifacts, pins);
-          const pinned = pinnedByCoord ?? pickProjectArtifact(candidateExact.artifacts, projectContext);
-          const bestArt = pinned ?? await ArtifactResolver.resolveBestArtifact(candidateExact.artifacts);
-          if (bestArt) {
-            // Resolve with inner-class $ notation
-            const innerPart = parts.slice(i).join('$');
-            const resolvedName = `${candidate}$${innerPart}`;
-            const entry = await resolveClassDetail(bestArt, resolvedName, clsName, wantsSource, wantsSignatures);
-            if (entry) {
-              return {
-                entry,
-                policy: pinnedByCoord ? 'explicit' : (pinned ? 'project-pinned' : 'cache-wide'),
-              };
-            }
-          }
-        }
-      }
-      return null;
-    }
+): Promise<{ entry: ClassEntry; policy: ResolvePolicy } | null> {
+  if (pinnedArtifact) {
+    return tryResolve(pinnedArtifact, clsName, clsName, wantsSource, wantsSignatures, 'explicit');
   }
 
-  if (!artifact) return null;
-  const entry = await resolveClassDetail(artifact, clsName, clsName, wantsSource, wantsSignatures);
-  if (!entry) return null;
-  return { entry, policy };
+  // Search for the class
+  const matches = indexer.searchClass(clsName);
+  const exactMatch = matches.find(m => m.className === clsName);
+
+  if (exactMatch) {
+    const lookupExact = (g: string, a: string, v: string) => indexer.getArtifactByCoordinate(g, a, v);
+
+    // Tried in order; each falls through when the class is not readable from
+    // that particular artifact.
+    const candidates: Array<{ artifact: Artifact | undefined; policy: ResolvePolicy }> = [
+      // An exact `g:a:v` pin is authoritative and is tried before the
+      // candidate list, which collapses versions per groupId:artifactId.
+      { artifact: pins.find(p => p.artifact)?.artifact, policy: 'explicit' },
+      {
+        artifact: pickProjectArtifact(exactMatch.artifacts, projectContext, lookupExact),
+        policy: 'project-pinned',
+      },
+      {
+        artifact: await ArtifactResolver.resolveBestArtifact(exactMatch.artifacts),
+        policy: 'cache-wide',
+      },
+    ];
+
+    for (const c of candidates) {
+      const hit = await tryResolve(c.artifact, clsName, clsName, wantsSource, wantsSignatures, c.policy);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  // Try inner class resolution: com.pkg.Outer.Inner -> com.pkg.Outer$Inner
+  const parts = clsName.split('.');
+  for (let i = parts.length - 1; i > 0; i--) {
+    const candidate = parts.slice(0, i).join('.');
+    const candidateMatches = indexer.searchClass(candidate);
+    const candidateExact = candidateMatches.find(m => m.className === candidate);
+    if (!candidateExact) continue;
+
+    const lookupExact = (g: string, a: string, v: string) => indexer.getArtifactByCoordinate(g, a, v);
+    const pinnedByCoord = pickPinnedArtifact(candidateExact.artifacts, pins);
+    const projectPinned = pickProjectArtifact(candidateExact.artifacts, projectContext, lookupExact);
+    const bestArt = pinnedByCoord
+      ?? projectPinned
+      ?? await ArtifactResolver.resolveBestArtifact(candidateExact.artifacts);
+    if (!bestArt) continue;
+
+    // Resolve with inner-class $ notation
+    const innerPart = parts.slice(i).join('$');
+    const resolvedName = `${candidate}$${innerPart}`;
+    const hit = await tryResolve(
+      bestArt,
+      resolvedName,
+      clsName,
+      wantsSource,
+      wantsSignatures,
+      pinnedByCoord ? 'explicit' : (projectPinned ? 'project-pinned' : 'cache-wide'),
+    );
+    if (hit) return hit;
+  }
+  return null;
 }
 
 async function resolveClassDetail(
