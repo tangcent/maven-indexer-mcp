@@ -1,0 +1,21 @@
+import { DB } from '@maven-indexer/engine';
+import { Indexer } from '@maven-indexer/engine';
+import { GlobalOpts, resolveDbPath, assertIndexNotEmpty } from './shared.js';
+import { print } from '@maven-indexer/engine';
+
+export async function run(coordinate: string, opts: GlobalOpts): Promise<void> {
+  const db = DB.getInstance(resolveDbPath());
+  assertIndexNotEmpty(db);
+
+  const parts = coordinate.split(':');
+  if (parts.length < 2 || parts.length > 3) {
+    process.stderr.write('Invalid coordinate format. Expected groupId:artifactId[:version]\n');
+    process.exit(1);
+  }
+  const [groupId, artifactId] = parts;
+
+  const indexer = Indexer.getInstance();
+  const results = indexer.findDependents(groupId, artifactId);
+
+  print('find-dependents', results, opts);
+}

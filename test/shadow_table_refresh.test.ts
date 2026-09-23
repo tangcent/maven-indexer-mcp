@@ -3,9 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { execSync } from 'child_process';
-import { Indexer } from '../src/indexer';
-import { Config } from '../src/config';
-import { DB } from '../src/db/index';
+import { Indexer, Config, DB } from '@maven-indexer/engine';
 
 /**
  * Builds a real Maven artifact (compiled .class file inside a JAR + POM) under
@@ -68,7 +66,7 @@ describe('Shadow-table refresh (T4.1, T4.2, T4.5, T4.16)', () => {
         process.env.MAVEN_REPO_PATH = repoDir;
         process.env.GRADLE_REPO_PATH = path.join(tmpDir, 'no-gradle');
         // Point CFR at the bundled jar to avoid any network download.
-        process.env.MAVEN_INDEXER_CFR_PATH = path.resolve(__dirname, '..', 'lib', 'cfr-0.152.jar');
+        process.env.MAVEN_INDEXER_CFR_PATH = path.resolve(__dirname, '..', 'packages', 'engine', 'lib', 'cfr-0.152.jar');
 
         DB.reset();
         Config.reset();

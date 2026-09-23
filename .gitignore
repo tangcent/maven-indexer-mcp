@@ -1,9 +1,20 @@
 node_modules/
 build/
+dist/
 maven-index.sqlite
+maven-index-*.sqlite
+maven-index-*.sqlite-shm
+maven-index-*.sqlite-wal
 *.log
 .DS_Store
 test-repo/
+test_temp*/
 .env
 coverage/
 .idea/
+
+# Bundle artifacts produced by scripts/bundle-package.mjs (not source)
+packages/mcp/lib/
+packages/cli/lib/
+packages/mcp/LICENSE
+packages/cli/LICENSE

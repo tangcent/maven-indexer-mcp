@@ -1,15 +1,12 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "Node16",
-    "moduleResolution": "Node16",
-    "outDir": "./build",
-    "rootDir": "./src",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
-  },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules"]
+  // Solution-style config: keeps editors happy (cross-package "go to definition")
+  // while each package compiles with its own tsconfig.json via `npm run build`.
+  // NOTE: `src/` moved to `packages/*/src` during the monorepo split — do not
+  // point this file back at ./src.
+  "files": [],
+  "references": [
+    { "path": "./packages/engine" },
+    { "path": "./packages/mcp" },
+    { "path": "./packages/cli" }
+  ]
 }

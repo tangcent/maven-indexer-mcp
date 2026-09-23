@@ -8,8 +8,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT" || exit 1
 
 # 1. Get current version
-CURRENT_VERSION=$(node -p "require('./package.json').version")
-echo "Current version: $CURRENT_VERSION"
+# The published artifact is packages/mcp — its version is the release version.
+CURRENT_VERSION=$(node -p "require('./packages/mcp/package.json').version")
+echo "Current version: $CURRENT_VERSION (packages/mcp)"
 
 # 2. Calculate candidate versions
 # Split version into parts (Assuming Semantic Versioning X.Y.Z)
@@ -80,7 +81,9 @@ fi
 # 3. Update version
 echo ""
 echo "Updating version to $NEW_VERSION..."
-npm version "$NEW_VERSION" --git-tag-version=false
+# Keep every workspace (and the root) on the same version — the monorepo is
+# released as one unit, and the bundled packages advertise this number.
+npm version "$NEW_VERSION" --workspaces --include-workspace-root --git-tag-version=false
 if [ $? -ne 0 ]; then
     echo "Error updating version."
     exit 1
@@ -104,23 +107,22 @@ fi
 # 5. Publish
 echo ""
 echo "Publishing to npm..."
-# Using --dry-run for now to prevent accidental publish during development/testing of this script
-# remove --dry-run for actual usage
-# read -p "Perform actual publish? (y/N - 'n' will do dry-run) " DO_PUBLISH
-# if [[ "$DO_PUBLISH" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-    npm publish
-# else
-#     npm publish --dry-run
-# fi
+# The root package is private — only the two publishable workspaces go out.
+npm publish --workspace=maven-indexer-mcp --access public
+ PUBLISH_CLI=$?
+if [ $PUBLISH_CLI -eq 0 ]; then
+    npm publish --workspace=maven-indexer-cli --access public
+    PUBLISH_CLI=$?
+fi
 
-if [ $? -eq 0 ]; then
+if [ $PUBLISH_CLI -eq 0 ]; then
     echo ""
     echo "Successfully published version $NEW_VERSION!"
     
     # Optional: Git tag
     read -p "Do you want to create a git tag and push? (y/N) " GIT_TAG
     if [[ "$GIT_TAG" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-        git add package.json package-lock.json
+        git add package.json package-lock.json packages/*/package.json
         git commit -m "chore(release): $NEW_VERSION"
         git tag "v$NEW_VERSION"
         git push && git push --tags

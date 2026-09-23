@@ -1,116 +1,108 @@
 # Development and Publication Guide
 
-This guide covers how to test the Maven Indexer MCP Server locally during development and how to publish it to the NPM registry.
+This guide covers how to build, test, and publish the Maven Indexer packages.
+
+## Repository layout
+
+This repository is an npm workspace monorepo:
+
+| Path | Package | Published | Role |
+|---|---|---|---|
+| `packages/engine` | `@maven-indexer/engine` | no (`private`) | All indexing / querying logic |
+| `packages/mcp` | `maven-indexer-mcp` | yes | MCP server (primary artifact) |
+| `packages/cli` | `maven-indexer-cli` | yes | CLI face over the same engine |
+
+The root package is `private: true` — it is never published.
 
 ## Local Development & Testing
 
 ### 1. Building the Project
-
-The project uses TypeScript, so you need to compile it before running:
 
 ```bash
 npm install
 npm run build
 ```
 
-To watch for changes during development:
-
-```bash
-npm run watch
-```
+`npm run build` compiles each workspace in dependency order. The two published
+packages are **bundled** with esbuild (`scripts/bundle-package.mjs`): the engine
+source is inlined into each package's `dist`, because `@maven-indexer/engine` is
+private and would otherwise be unresolvable for consumers. Third-party runtime
+dependencies (notably the native `better-sqlite3` addon) stay external, and each
+bundle script copies `cfr-0.152.jar` into the package's `lib/`.
 
 ### 2. Running Tests
 
-We use Vitest for testing. Run the test suite with:
-
 ```bash
-npm test
+npm test          # or: npx vitest run
 ```
+
+Vitest aliases `@maven-indexer/engine` to `packages/engine/src/index.ts`, so
+tests run against engine **source** — no prior `npm run build` required.
 
 ### 3. Testing the MCP Server Locally
 
-There are two main ways to test the server with an MCP client (like Claude Desktop) before publishing.
+#### Option A: Absolute path (recommended for active dev)
 
-#### Option A: Use Absolute Path (Recommended for active dev)
-
-Configure your MCP client to point directly to the built file. This allows you to see changes immediately after rebuilding.
+Point your MCP client at the bundled file and rebuild after each change:
 
 ```json
 {
   "mcpServers": {
     "maven-indexer-local": {
       "command": "node",
-      "args": ["/ABSOLUTE/PATH/TO/maven-indexer/build/index.js"],
+      "args": ["/ABSOLUTE/PATH/TO/maven-index/packages/mcp/dist/index.js"],
       "env": {
-        "MAVEN_REPO": "/path/to/test/repo", // Optional: Override for testing
-        "GRADLE_REPO_PATH": "/path/to/test/gradle-repo" // Optional: Override for testing
+        "MAVEN_REPO": "/path/to/test/repo",
+        "GRADLE_REPO_PATH": "/path/to/test/gradle-repo"
       }
     }
   }
 }
 ```
 
-#### Option B: `npm link` (Simulate global install)
+#### Option B: `npm link` (simulate global install)
 
-1.  In the project root, run:
-    ```bash
-    npm link
-    ```
-2.  This registers `maven-indexer-mcp` globally on your machine.
-3.  Configure your MCP client:
-    ```json
-    {
-      "mcpServers": {
-        "maven-indexer-link": {
-          "command": "maven-indexer-mcp",
-          "args": []
-        }
-      }
-    }
-    ```
+```bash
+cd packages/mcp
+npm link
+```
+
+This registers the `maven-indexer-mcp` binary globally.
 
 ### 4. Verify Local Packaging
 
-Before publishing, it's good practice to verify what files will be included in the package.
+Never publish without checking what ships:
 
-1.  Run `npm pack`. This creates a `.tgz` file (e.g., `maven-indexer-mcp-1.0.0.tgz`).
-2.  Inspect the contents of the tarball to ensure `build/`, `README.md`, and `LICENSE` are included and extraneous files are excluded.
+```bash
+npm pack --dry-run --workspace=maven-indexer-mcp
+npm pack --dry-run --workspace=maven-indexer-cli
+```
 
-## Publishing to NPM
+Each tarball must contain `dist/`, `lib/cfr-0.152.jar`, `README.md`, `LICENSE`
+and **no** dependency on `@maven-indexer/engine` (it is private).
+
+## Publishing
 
 ### Prerequisites
 
-1.  An account on [npmjs.com](https://www.npmjs.com/).
-2.  Login to npm via terminal:
-    ```bash
-    npm login
-    ```
+1. An account on [npmjs.com](https://www.npmjs.com/).
+2. `npm login`
 
-### Publishing Steps
+### Publishing steps
 
-1.  **Update Version**: If you have made changes, update the version number in `package.json`. You can use the npm version command:
-    ```bash
-    npm version patch  # 1.0.0 -> 1.0.1
-    npm version minor  # 1.0.0 -> 1.1.0
-    npm version major  # 1.0.0 -> 2.0.0
-    ```
+```bash
+./scripts/release.sh      # bumps every workspace version + builds + publishes
+./scripts/publish.sh      # publish only (npm / GitHub Packages / both)
+```
 
-2.  **Build and Publish**:
-    The `prepublishOnly` script in `package.json` will automatically run `npm run build` before publishing.
+Notes:
 
-    ```bash
-    npm publish
-    ```
-    
-    *Note: If this is the first time publishing a scoped package (e.g. `@username/package`), you might need to add `--access public`.*
-
-3.  **Verification**:
-    *   Check the package page on npmjs.com.
-    *   Try running it via `npx`:
-        ```bash
-        npx maven-indexer-mcp@latest
-        ```
+- **Always target workspaces.** Plain `npm publish` from the root fails: the root
+  package is private.
+- `prepublishOnly` runs the bundle step for each published workspace.
+- Verify afterwards with `npx -y maven-indexer-mcp@latest`.
 
 ### Automation
 
-The project is set up with GitHub Actions (in `.github/workflows/ci.yml`) to run tests on every push. You can extend this to automatically publish to NPM on release creation if desired.
+`.github/workflows/ci.yml` runs build + tests on every push and pull request
+across Linux, macOS, and Windows.

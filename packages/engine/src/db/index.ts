@@ -154,6 +154,25 @@ const MIGRATIONS: Migration[] = [
   CREATE INDEX IF NOT EXISTS idx_dependencies_artifact ON dependencies(artifact_id);
   CREATE INDEX IF NOT EXISTS idx_dependencies_dep ON dependencies(dep_group_id, dep_artifact_id);`,
   },
+  {
+    version: 9,
+    name: 'add_call_edges_table',
+    sql: `CREATE TABLE IF NOT EXISTS call_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caller_class TEXT NOT NULL,
+    caller_method TEXT NOT NULL,
+    caller_descriptor TEXT,
+    callee_class TEXT NOT NULL,
+    callee_method TEXT NOT NULL,
+    callee_descriptor TEXT,
+    invoke_kind TEXT NOT NULL,
+    artifact_id INTEGER NOT NULL,
+    resolved INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_class, caller_method);
+  CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_class, callee_method);`,
+  },
 ];
 
 export class DB {

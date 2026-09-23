@@ -2,9 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
-import { Indexer } from '../src/indexer';
-import { Config } from '../src/config';
-import { DB } from '../src/db/index';
+import { Indexer, Config, DB } from '@maven-indexer/engine';
 
 const TEST_REPO_DIR = path.resolve('test-repo-integration');
 const DB_FILE = 'maven-index.sqlite';
@@ -140,8 +138,8 @@ describe('Maven Indexer Integration', () => {
     // Note: get_class_details is logic inside index.ts (the MCP server handler), 
     // but the underlying logic uses SourceParser. Let's test SourceParser directly.
     it('should parse source details', async () => {
-        const { SourceParser } = await import('../src/source_parser');
-        
+        const { SourceParser } = await import('@maven-indexer/engine');
+
         // We need the absolute path to the jar
         const artifactDir = path.join(TEST_REPO_DIR, 'com/test/demo/1.0.0');
         const sourceJar = path.join(artifactDir, 'demo-1.0.0-sources.jar');
@@ -160,8 +158,8 @@ describe('Maven Indexer Integration', () => {
     });
 
     it('should detect kotlin source', async () => {
-        const { SourceParser } = await import('../src/source_parser');
-        
+        const { SourceParser } = await import('@maven-indexer/engine');
+
         // Create a fake sources jar with a .kt file
         const artifactDir = path.join(TEST_REPO_DIR, 'com/test/demo/1.0.0');
         const ktSourceJar = path.join(artifactDir, 'demo-1.0.0-kt-sources.jar');

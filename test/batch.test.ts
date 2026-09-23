@@ -3,7 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { execSync } from 'child_process';
-import { DB } from '../src/db/index';
+import { DB } from '@maven-indexer/engine';
 
 const TEST_REPO_DIR = path.resolve('test-repo-batch');
 const DB_FILE = 'maven-index-batch.sqlite';
@@ -121,18 +121,31 @@ describe('MCP Server Batch Queries', () => {
     it('should support batch queries', async () => {
         execSync('npm run build');
 
-        server = spawn('node', ['build/index.js'], {
+        server = spawn('node', ['packages/mcp/dist/index.js'], {
             stdio: ['pipe', 'pipe', 'inherit'],
             env: { 
                 ...process.env, 
                 MAVEN_REPO_PATH: TEST_REPO_DIR,
                 GRADLE_REPO_PATH: "/non-existent",
-                DB_FILE: DB_FILE
+                DB_FILE: DB_FILE,
+                MAVEN_INDEXER_MCP_TOOLS: ''
             }
         });
 
-        // Wait for server to be ready
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Wait for the server's background index to finish. A fixed sleep races
+        // the async indexing once the suite runs under parallel load.
+        const deadline = Date.now() + 60_000;
+        let indexed = false;
+        while (Date.now() < deadline && !indexed) {
+            try {
+                const stats = await sendRequest("tools/call", { name: "stats", arguments: {} });
+                indexed = /Artifact Count:\s*[1-9]/.test(stats?.content?.[0]?.text ?? '');
+            } catch {
+                // server not ready yet
+            }
+            if (!indexed) await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        expect(indexed, 'MCP server should finish indexing the test repo').toBe(true);
 
         // Batch search_artifacts
         const searchRes = await sendRequest("tools/call", {
@@ -144,7 +157,7 @@ describe('MCP Server Batch Queries', () => {
 
         // Batch search_classes
         const classesRes = await sendRequest("tools/call", {
-            name: "search_classes",
+            name: "search",
             arguments: { classNames: ["BatchClass1", "BatchClass2"] }
         });
         expect(classesRes.content[0].text).toContain("Results for \"BatchClass1\"");
@@ -152,13 +165,15 @@ describe('MCP Server Batch Queries', () => {
         
         // Batch get_class_details
         const detailsRes = await sendRequest("tools/call", {
-            name: "get_class_details",
-            arguments: { 
+            name: "get_class",
+            arguments: {
                 classNames: ["com.example.demo.BatchClass1", "com.example.demo.BatchClass2"],
                 type: "signatures"
             }
         });
         expect(detailsRes.content[0].text).toContain("Class: com.example.demo.BatchClass1");
         expect(detailsRes.content[0].text).toContain("Class: com.example.demo.BatchClass2");
-    }, 30000);
+        // This case runs `npm run build` itself, which has to share the machine
+        // with the rest of the suite — 30s was too tight under parallel load.
+    }, 180000);
 });
