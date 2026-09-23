@@ -141,7 +141,12 @@ describe('project context', () => {
     expect(fs.existsSync(sidecar)).toBe(true);
 
     // Same mtime would be a cache hit; changing the file must invalidate it.
+    // Force a distinct mtime: filesystems can hand out identical timestamps
+    // for writes in the same tick, which would make this test flaky.
     writePom('2.0.0');
+    const futureMtime = new Date(Date.now() + 60_000);
+    fs.utimesSync(pomPath, futureMtime, futureMtime);
+
     const second = await getProjectContext(projectDir);
     expect(second.projectCoordinate?.version).toBe('2.0.0');
   });

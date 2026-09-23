@@ -105,9 +105,12 @@ describe('explore', () => {
     expect(result._meta.resolved['com.example.Greeter'].policy).toBe('explicit');
   });
 
-  it('prefers the latest version when no coordinate is given', async () => {
+  it('falls back to the cache-wide heuristic when no coordinate is given', async () => {
     const result = await explore({ identifiers: ['com.example.Greeter'] });
-    expect(result._meta.resolved['com.example.Greeter'].artifact).toBe('com.example:greeter:2.0.0');
+    // Which version wins is resolver policy (covered by version_strategy.test.ts);
+    // here we only assert it is NOT attributed to an explicit pin or project.
+    expect(result._meta.resolved['com.example.Greeter'].policy).toBe('cache-wide');
+    expect(result._meta.resolved['com.example.Greeter'].artifact).toMatch(/^com\.example:greeter:/);
   });
 
   it('reports unknown coordinates instead of silently returning nothing', async () => {

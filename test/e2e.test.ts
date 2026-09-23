@@ -148,8 +148,20 @@ describe('MCP Server E2E', () => {
             }
         });
 
-        // Wait for server to be ready (naive wait)
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Wait for the server's background index to finish. A fixed sleep races
+        // the async indexing once the suite runs under parallel load.
+        const deadline = Date.now() + 60_000;
+        let indexed = false;
+        while (Date.now() < deadline && !indexed) {
+            try {
+                const stats = await sendRequest("tools/call", { name: "stats", arguments: {} });
+                indexed = /Artifact Count:\s*[1-9]/.test(stats?.content?.[0]?.text ?? '');
+            } catch {
+                // server not ready yet
+            }
+            if (!indexed) await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        expect(indexed, 'MCP server should finish indexing the test repo').toBe(true);
 
         // Test 1: Search Classes
         const searchResult = await sendRequest("tools/call", {

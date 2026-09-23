@@ -132,8 +132,20 @@ describe('MCP Server Batch Queries', () => {
             }
         });
 
-        // Wait for server to be ready
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Wait for the server's background index to finish. A fixed sleep races
+        // the async indexing once the suite runs under parallel load.
+        const deadline = Date.now() + 60_000;
+        let indexed = false;
+        while (Date.now() < deadline && !indexed) {
+            try {
+                const stats = await sendRequest("tools/call", { name: "stats", arguments: {} });
+                indexed = /Artifact Count:\s*[1-9]/.test(stats?.content?.[0]?.text ?? '');
+            } catch {
+                // server not ready yet
+            }
+            if (!indexed) await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        expect(indexed, 'MCP server should finish indexing the test repo').toBe(true);
 
         // Batch search_artifacts
         const searchRes = await sendRequest("tools/call", {
@@ -161,5 +173,7 @@ describe('MCP Server Batch Queries', () => {
         });
         expect(detailsRes.content[0].text).toContain("Class: com.example.demo.BatchClass1");
         expect(detailsRes.content[0].text).toContain("Class: com.example.demo.BatchClass2");
-    }, 30000);
+        // This case runs `npm run build` itself, which has to share the machine
+        // with the rest of the suite — 30s was too tight under parallel load.
+    }, 180000);
 });
