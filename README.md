@@ -1,7 +1,7 @@
 # Maven Index
 
 [![npm version](https://img.shields.io/npm/v/maven-indexer-mcp.svg?style=flat)](https://www.npmjs.com/package/maven-indexer-mcp)
-[![Tests](https://github.com/tangcent/maven-index/actions/workflows/ci.yml/badge.svg)](https://github.com/tangcent/maven-index/actions/workflows/ci.yml)
+[![Tests](https://github.com/tangcent/maven-indexer-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/tangcent/maven-indexer-mcp/actions/workflows/ci.yml)
 
 An MCP server and CLI that indexes your local Maven repository (`~/.m2/repository`) and Gradle cache
 (`~/.gradle/caches/modules-2/files-2.1`) to provide AI agents with tools to search for Java classes, method signatures,
