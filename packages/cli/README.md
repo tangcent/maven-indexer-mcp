@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/maven-indexer-cli.svg?style=flat)](https://www.npmjs.com/package/maven-indexer-cli)
 
-> Part of the **[`maven-index`](https://github.com/tangcent/maven-index)** monorepo — the unified home for `maven-indexer-cli` and `maven-indexer-mcp`.
+> Part of the **[`maven-indexer-mcp`](https://github.com/tangcent/maven-indexer-mcp)** monorepo — the unified home for `maven-indexer-cli` and `maven-indexer-mcp`.
 
 The Commander.js CLI face of the Maven/Gradle artifact index. Thin wrapper over the [`@maven-indexer/engine`](../engine) package. Use this when driving dependency lookups from a terminal coding agent (token-efficient CLI + SKILL workflow).
 
@@ -13,9 +13,9 @@ The Commander.js CLI face of the Maven/Gradle artifact index. Thin wrapper over 
 
 ## Repository
 
-- Source: <https://github.com/tangcent/maven-index/tree/main/packages/cli>
-- Issues: <https://github.com/tangcent/maven-index/issues>
-- Unified repo: <https://github.com/tangcent/maven-index> (formerly `maven-indexer-mcp`; the standalone `maven-indexer-cli` git repo is deprecated)
+- Source: <https://github.com/tangcent/maven-indexer-mcp/tree/main/packages/cli>
+- Issues: <https://github.com/tangcent/maven-indexer-mcp/issues>
+- Unified repo: <https://github.com/tangcent/maven-indexer-mcp> (the standalone `maven-indexer-cli` git repo is deprecated)
 
 ## Install
 
