@@ -1,6 +1,6 @@
 {
   "name": "maven-index",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Unified engine + CLI + MCP server over the local JVM artifact cache (renamed from maven-indexer-mcp)",
   "type": "module",
