@@ -73,7 +73,7 @@ Follow [Cline's MCP guide](https://docs.cline.bot/mcp/configuring-mcp-servers) a
 
 #### Codex
 
-Follow the [configure MCP guide](https://github.com/openai/codex/blob/main/docs/advanced.md#model-context-protocol-mcp) using the standard config from above.
+Follow the [configure MCP guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) using the standard config from above.
 
 #### Cursor
 
