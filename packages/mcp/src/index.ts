@@ -445,7 +445,7 @@ maybeRegister('search_artifacts',
   {
     description: "Search for internal company artifacts and libraries in the local Maven repository and Gradle caches by coordinate (groupId, artifactId), keyword, or class name. Use this primarily for internal company packages or to find available versions of internal projects that are locally built. Also supports searching third-party libraries in the local cache. Supports batch queries.",
     inputSchema: z.object({
-      query: z.string().optional().describe("Search query (groupId, artifactId, keyword, or class name)"),
+      query: z.string().optional().describe("Search query: groupId, artifactId, keyword, class name, or an exact \"groupId:artifactId[:version]\" coordinate. Results list the newest versions first."),
       queries: z.array(z.string()).optional().describe("Batch search queries"),
     }),
   },
@@ -458,12 +458,13 @@ maybeRegister('search_artifacts',
         return { content: [{ type: "text", text: "No query provided." }], isError: true };
     }
 
-    const results = allQueries.map(q => {
+    const results = await Promise.all(allQueries.map(async q => {
         let allMatches: Artifact[] = [];
         let searchType = "artifact";
         
-        // First try class search (for both simple and fully qualified class names)
-        const classSearchResults = indexer.searchClass(q);
+        // First try class search (for both simple and fully qualified class names);
+        // a groupId:artifactId[:version] coordinate goes straight to artifact search.
+        const classSearchResults = q.includes(':') && !q.startsWith('regex:') ? [] : indexer.searchClass(q);
         if (classSearchResults.length > 0) {
           // Extract unique artifacts from class search results
           const artifactMap = new Map<string, Artifact>();
@@ -475,22 +476,31 @@ maybeRegister('search_artifacts',
               }
             });
           });
-          allMatches = Array.from(artifactMap.values());
+          allMatches = Array.from(artifactMap.values()).sort(ArtifactResolver.compareForListing);
           searchType = "class";
         } else {
-          // Fallback to artifact search if class search finds nothing
-          allMatches = indexer.search(q);
+          // Fallback to artifact search if class search finds nothing.
+          // No limit here so "Found N" is the real total; display is capped below.
+          allMatches = indexer.search(q, Number.POSITIVE_INFINITY);
         }
-        
-        // Limit results to avoid overflow
+
+        // Limit results to avoid overflow (matches are sorted newest version first)
         const limitedMatches = allMatches.slice(0, 20);
-        
-        const text = limitedMatches.length > 0
+
+        let text = limitedMatches.length > 0
             ? limitedMatches.map(a => `${a.groupId}:${a.artifactId}:${a.version} (Has Source: ${a.hasSource})`).join("\n")
             : "No artifacts found matching the query.";
+        if (allMatches.length > 20) {
+            text += `\n${allMatches.length - 20} more not shown. To find a specific version, query "groupId:artifactId:version".`;
+        }
+        const coord = q.split(':').map(p => p.trim());
+        if (allMatches.length === 0 && coord.length === 3 && coord.every(p => p.length > 0)) {
+            const reason = await indexer.explainMissingVersion(coord[0], coord[1], coord[2]);
+            if (reason) text += `\n${reason}`;
+        }
 
         return `### Results for "${q}" (Found ${allMatches.length} via ${searchType} search${allMatches.length > 20 ? ', showing first 20' : ''}):\n${text}`;
-    });
+    }));
 
     return {
       content: [

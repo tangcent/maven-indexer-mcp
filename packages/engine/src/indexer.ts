@@ -1293,24 +1293,63 @@ export class Indexer {
 
     /**
      * Searches for artifacts by group ID or artifact ID.
+     *
+     * A `groupId:artifactId[:version]` query matches those columns exactly;
+     * anything else is a substring match on groupId or artifactId.
+     * Results are ordered by groupId:artifactId, newest version first, and
+     * the limit is applied after sorting so it never drops the newest versions.
      */
     public search(query: string, limit: number = 100): Artifact[] {
-        // Artifact coordinates search
         const db = DB.getInstance();
         try {
-            const like = likeContains(query);
-            const rows = db.prepare(`
-                SELECT id, group_id, artifact_id, version, abspath, has_source, layout
-                FROM artifacts
-                WHERE group_id LIKE ? ESCAPE '\\'
-                   OR artifact_id LIKE ? ESCAPE '\\'
-                LIMIT ?
-            `).all(like, like, limit) as ArtifactRow[];
-            return rows.map(row => this.mapArtifact(row));
+            const coord = query.split(':').map(p => p.trim());
+            const isCoordinate = coord.length >= 2 && coord.length <= 3 && coord.every(p => p.length > 0);
+            const rows = isCoordinate
+                ? db.prepare(`
+                    SELECT id, group_id, artifact_id, version, abspath, has_source, layout
+                    FROM artifacts
+                    WHERE group_id = ? AND artifact_id = ?${coord.length === 3 ? ' AND version = ?' : ''}
+                `).all(...coord) as ArtifactRow[]
+                : db.prepare(`
+                    SELECT id, group_id, artifact_id, version, abspath, has_source, layout
+                    FROM artifacts
+                    WHERE group_id LIKE ? ESCAPE '\\'
+                       OR artifact_id LIKE ? ESCAPE '\\'
+                `).all(likeContains(query), likeContains(query)) as ArtifactRow[];
+            return rows
+                .map(row => this.mapArtifact(row))
+                .sort(ArtifactResolver.compareForListing)
+                .slice(0, limit);
         } catch (e) {
             console.error(`search failed (query=${JSON.stringify(query)})`, e);
             return [];
         }
+    }
+
+    /**
+     * Explains why an exact `g:a:v` is not in the index when its Maven
+     * directory exists on disk: the scanner needs a `.pom`, and artifacts
+     * without a main JAR are pruned. Returns undefined when there is no such
+     * directory (the version is not in the local Maven repository).
+     */
+    public async explainMissingVersion(groupId: string, artifactId: string, version: string): Promise<string | undefined> {
+        const config = await Config.getInstance();
+        if (!config.localRepository) return undefined;
+        const dir = path.join(config.localRepository, ...groupId.split('.'), artifactId, version);
+        let files: string[];
+        try {
+            files = fsSync.readdirSync(dir);
+        } catch {
+            return undefined;
+        }
+        if (!files.some(f => f.endsWith('.pom'))) {
+            return `${dir} exists but has no .pom file, so it is not indexed (a failed download leaves only *.lastUpdated files).`;
+        }
+        const mainJar = resolveMainJar({ abspath: dir, artifactId, version, layout: 'maven' });
+        if (!fsSync.existsSync(mainJar)) {
+            return `${dir} exists but has no main JAR (${path.basename(mainJar)}), so it is not indexed.`;
+        }
+        return `${dir} exists on disk but is not indexed yet; refresh the index.`;
     }
 
     /**
