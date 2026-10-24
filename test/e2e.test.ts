@@ -150,12 +150,19 @@ describe('MCP Server E2E', () => {
 
         // Wait for the server's background index to finish. A fixed sleep races
         // the async indexing once the suite runs under parallel load.
+        //
+        // `Artifact Count` alone is not a completion signal: artifact rows are
+        // written before JARs are parsed, so it can be non-zero while the first
+        // search still sees zero classes. `last_indexed_at` is stamped only
+        // after the whole pass ends (indexer.index()), so require it too.
         const deadline = Date.now() + 60_000;
         let indexed = false;
         while (Date.now() < deadline && !indexed) {
             try {
                 const stats = await sendRequest("tools/call", { name: "stats", arguments: {} });
-                indexed = /Artifact Count:\s*[1-9]/.test(stats?.content?.[0]?.text ?? '');
+                const text = stats?.content?.[0]?.text ?? '';
+                const lastIndexedAt = /Last Indexed At:\s*(\S+)/.exec(text)?.[1];
+                indexed = /Artifact Count:\s*[1-9]/.test(text) && !!lastIndexedAt && lastIndexedAt !== 'never';
             } catch {
                 // server not ready yet
             }
@@ -188,5 +195,6 @@ describe('MCP Server E2E', () => {
         });
 
         expect(detailsResult.content[0].text).toContain("public String hello(String name)");
-    }, 30000); // 30s timeout
+    }, 180000); // 180s: this case runs `npm run build` itself, and that has to share
+                // the machine with the rest of the suite (same as batch.test.ts).
 });
