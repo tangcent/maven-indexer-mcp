@@ -26,6 +26,7 @@ import * as impact from './commands/impact.js';
 import * as trace from './commands/trace.js';
 import * as doctor from './commands/doctor.js';
 import { runInstall, runUninstall } from './commands/install/index.js';
+import { runSkills } from './commands/install/skills.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -333,6 +334,31 @@ program
       json: globalOpts.json,
     });
   });
+
+const skills = program
+  .command('skills')
+  .description('Install the maven-indexer Agent Skill (SKILL.md) so coding agents call this CLI directly. No MCP config is written.');
+
+const skillTargetOption = 'Which agent(s): `auto` = detected agents (default), `all`, or a csv of `claude`, `agents` (~/.agents/skills: Codex, Gemini CLI, OpenCode, ...), `cursor`.';
+
+for (const mode of ['install', 'uninstall', 'status'] as const) {
+  const sub = skills
+    .command(mode)
+    .description({
+      install: 'Copy the skill into each agent\'s skills directory (idempotent; re-run to update).',
+      uninstall: 'Remove the skill from each agent\'s skills directory.',
+      status: 'Show whether the skill is installed and current for each agent.',
+    }[mode])
+    .option('--target <csv|auto|all>', skillTargetOption, 'auto')
+    .option('--location <global|local>', 'Scope: `global` (home directory, default) or `local` (current project).', 'global')
+    .option('--dir <path>', 'Use this skills directory instead of --target/--location.');
+  if (mode !== 'status') {
+    sub.option('--dry-run', 'Print the plan without writing any files.');
+  }
+  sub.action((cmdOpts: { target?: string; location?: string; dir?: string; dryRun?: boolean }) => {
+    runSkills(mode, { ...cmdOpts, json: getGlobalOpts().json });
+  });
+}
 
 // Handle unknown commands
 program.on('command:*', () => {

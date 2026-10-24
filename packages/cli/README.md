@@ -19,11 +19,24 @@ The Commander.js CLI face of the Maven/Gradle artifact index. Thin wrapper over 
 
 ## Install
 
+Install the CLI and the `maven-indexer` Agent Skill in one step:
+
 ```bash
-npm install -g maven-indexer-cli
-# or
-npx maven-indexer-cli <command>
+curl -fsSL https://raw.githubusercontent.com/tangcent/maven-indexer-mcp/main/install.sh | bash
 ```
+
+Or step by step:
+
+```bash
+npm install -g maven-indexer-cli   # or: npx -y maven-indexer-cli <command>
+maven-indexer-cli refresh-index    # build the index once
+maven-indexer-cli skills install   # copy the skill into every detected agent's skills directory
+```
+
+`maven-indexer-cli skills install|status|uninstall` accept `--target auto|all|claude,agents,cursor`,
+`--location global|local` and `--dir <skills-dir>`. See the
+[root README](https://github.com/tangcent/maven-indexer-mcp#cli--agent-skill) for all install options
+and the per-agent skill directories.
 
 ## Primary command
 

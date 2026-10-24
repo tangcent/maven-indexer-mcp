@@ -9,6 +9,91 @@ and source code — even for internal company packages and non-well-known public
 
 ## Quick Install
 
+There are two ways to give an agent access to the index. Pick one, or use both:
+
+- **CLI + Agent Skill**: for terminal coding agents (Claude Code, Codex, Gemini CLI, OpenCode, Cursor).
+  The agent runs `maven-indexer-cli` commands, guided by the `maven-indexer` skill. No tool schemas
+  sit in the context window, so it uses fewer tokens.
+- **MCP server**: for IDE-integrated agents (Cursor, Kiro, Windsurf, JetBrains, ...). See [MCP server](#mcp-server).
+
+### CLI + Agent Skill
+
+#### Install script (recommended)
+
+One command installs `maven-indexer-cli` from npm and the `maven-indexer` skill for every coding
+agent it detects:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tangcent/maven-indexer-mcp/main/install.sh | bash
+```
+
+Requires Node.js 18+ and npm. Pass options after `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tangcent/maven-indexer-mcp/main/install.sh | bash -s -- --target claude,agents --index
+```
+
+| Option | Meaning |
+|---|---|
+| `--target <t>` | Which agents get the skill: `auto` (detected agents, default), `all`, or a csv of `claude`, `agents`, `cursor` (see the [skill directories](#skill-directories)). |
+| `--location <l>` | `global` (home directory, default) or `local` (current project). |
+| `--dir <path>` | Install the skill into this skills directory instead. |
+| `--version <v>` | `maven-indexer-cli` version to install (default `latest`). |
+| `--skip-cli` / `--skip-skills` | Install only the skill / only the CLI. |
+| `--index` | Build the index right after installing. |
+
+Re-running the script upgrades both the CLI and the skill. Restart your agent (or start a new
+session) afterwards so it loads the skill.
+
+#### Manual install: maven-indexer-cli
+
+```bash
+npm install -g maven-indexer-cli
+maven-indexer-cli refresh-index   # build the index once; later runs use `maven-indexer-cli sync`
+```
+
+Or run it without installing: `npx -y maven-indexer-cli <command>`.
+
+#### Install the skill with maven-indexer-cli
+
+Once the CLI is installed, it can install the skill it ships with:
+
+```bash
+maven-indexer-cli skills install                          # every detected agent, global
+maven-indexer-cli skills install --target claude,agents   # pick agents
+maven-indexer-cli skills install --location local         # into the current project (.claude/skills, ...)
+maven-indexer-cli skills install --dir ~/my-agent/skills  # any skills directory
+maven-indexer-cli skills status                           # installed / stale / missing per agent
+maven-indexer-cli skills uninstall
+```
+
+`skills install` is idempotent: run it again after upgrading the CLI to update the skill. Add
+`--dry-run` to preview the files it writes. It never overwrites a different skill that happens to
+use the `maven-indexer` directory name.
+
+#### Manual install: the skill
+
+The skill is a single file, [`skills/maven-indexer/SKILL.md`](skills/maven-indexer/SKILL.md). Copy
+it into a `maven-indexer` folder under your agent's skills directory, for example for Claude Code:
+
+```bash
+mkdir -p ~/.claude/skills/maven-indexer
+curl -fsSL https://raw.githubusercontent.com/tangcent/maven-indexer-mcp/main/skills/maven-indexer/SKILL.md -o ~/.claude/skills/maven-indexer/SKILL.md
+```
+
+##### Skill directories
+
+| Target | Agents | Global | Local (project) |
+|---|---|---|---|
+| `claude` | Claude Code | `~/.claude/skills/` | `.claude/skills/` |
+| `agents` | Codex, Gemini CLI, OpenCode and other clients that read the shared Agent Skills folder | `~/.agents/skills/` | `.agents/skills/` |
+| `cursor` | Cursor | `~/.cursor/skills/` | `.cursor/skills/` |
+
+`auto` picks every target whose agent folder exists (`~/.claude`; `~/.agents`, `~/.codex`,
+`~/.gemini` or `~/.config/opencode`; `~/.cursor`), and falls back to `claude` when none does.
+
+### MCP server
+
 Add the following config to your MCP client:
 
 ```json
@@ -27,6 +112,56 @@ Add the following config to your MCP client:
 
 This will automatically download and run the latest version of the server. It will auto-detect your Maven repository
 location (usually `~/.m2/repository`) and Gradle cache.
+
+`maven-indexer-cli install` can also write this entry (plus a short instructions block) into the
+config files of Claude Code, Cursor, Codex, OpenCode, Gemini CLI and Windsurf; run
+`maven-indexer-cli install --help` for its options.
+
+#### MCP Client configuration
+
+##### Cline
+
+Follow [Cline's MCP guide](https://docs.cline.bot/mcp/configuring-mcp-servers) and use the config provided above.
+
+##### Codex
+
+Follow the [configure MCP guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) using the standard config from above.
+
+##### Cursor
+
+**Click the button to install:**
+
+[![Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=maven-indexer&config=eyJjb21tYW5kIjoibnB4IC15IG1hdmVuLWluZGV4ZXItbWNwQGxhdGVzdCJ9)
+
+**Or install manually:**
+
+Go to `Cursor Settings` -> `MCP` -> `New MCP Server`. Use the config provided above.
+
+##### JetBrains AI Assistant & Junie
+
+Go to `Settings | Tools | AI Assistant | Model Context Protocol (MCP)` -> `Add`. Use the config provided above.
+The same way `maven-indexer` can be configured for JetBrains Junie in `Settings | Tools | Junie | MCP Settings` ->`Add`.
+Use the config provided above.
+
+##### Kiro
+
+In **Kiro Settings**, go to `Configure MCP` > `Open Workspace or User MCP Config` > Use the configuration snippet provided above.
+
+Or, from the IDE **Activity Bar** > `Kiro` > `MCP Servers` > `Click Open MCP Config`. Use the configuration snippet provided above.
+
+##### Qoder
+
+In **Qoder Settings**, go to `MCP Server` > `+ Add` > Use the configuration snippet provided above.
+
+Alternatively, follow the [MCP guide](https://docs.qoder.com/user-guide/chat/model-context-protocol) and use the standard config from above.
+
+##### Trae
+
+Go to `Settings` -> `MCP` -> `+ Add` -> `Add Manually` to add an MCP Server. Use the config provided above.
+
+##### Windsurf
+
+Follow the [configure MCP guide](https://docs.windsurf.com/windsurf/cascade/mcp#mcp-config-json) using the standard config from above.
 
 ## Upgrading from maven-indexer-mcp 1.0.x
 
@@ -55,71 +190,15 @@ Everything else is unchanged — the published package name is still
 `maven-indexer-mcp` (the *repository* was renamed to `maven-index`), and the CLI
 runs through the `maven-indexer-cli` binary.
 
-### CLI alternative
-
-Install globally for direct terminal usage:
-
-```bash
-npm install -g maven-indexer-cli
-```
-
-Then use `maven-indexer-cli explore ...` or any of the CLI commands directly.
-
-### MCP Client configuration
-
-#### Cline
-
-Follow [Cline's MCP guide](https://docs.cline.bot/mcp/configuring-mcp-servers) and use the config provided above.
-
-#### Codex
-
-Follow the [configure MCP guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) using the standard config from above.
-
-#### Cursor
-
-**Click the button to install:**
-
-[![Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=maven-indexer&config=eyJjb21tYW5kIjoibnB4IC15IG1hdmVuLWluZGV4ZXItbWNwQGxhdGVzdCJ9)
-
-**Or install manually:**
-
-Go to `Cursor Settings` -> `MCP` -> `New MCP Server`. Use the config provided above.
-
-#### JetBrains AI Assistant & Junie
-
-Go to `Settings | Tools | AI Assistant | Model Context Protocol (MCP)` -> `Add`. Use the config provided above.
-The same way `maven-indexer` can be configured for JetBrains Junie in `Settings | Tools | Junie | MCP Settings` ->`Add`.
-Use the config provided above.
-
-#### Kiro
-
-In **Kiro Settings**, go to `Configure MCP` > `Open Workspace or User MCP Config` > Use the configuration snippet provided above.
-
-Or, from the IDE **Activity Bar** > `Kiro` > `MCP Servers` > `Click Open MCP Config`. Use the configuration snippet provided above.
-
-#### Qoder
-
-In **Qoder Settings**, go to `MCP Server` > `+ Add` > Use the configuration snippet provided above.
-
-Alternatively, follow the [MCP guide](https://docs.qoder.com/user-guide/chat/model-context-protocol) and use the standard config from above.
-
-#### Trae
-
-Go to `Settings` -> `MCP` -> `+ Add` -> `Add Manually` to add an MCP Server. Use the config provided above.
-
-#### Windsurf
-
-Follow the [configure MCP guide](https://docs.windsurf.com/windsurf/cascade/mcp#mcp-config-json) using the standard config from above.
-
 ## Your first prompt
 
-Enter the following prompt in your MCP Client to check if everything is working:
+Enter the following prompt in your agent to check if everything is working:
 
 ```text
 Find the class `StringUtils` in my local maven repository and show me its methods.
 ```
 
-Your MCP client should read the class `StringUtils` from your local Maven repository and show its methods.
+Your agent should read the class `StringUtils` from your local Maven repository and show its methods.
 
 ## Configuration (Optional)
 
