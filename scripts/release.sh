@@ -196,9 +196,13 @@ else
     echo "Updating version to $NEW_VERSION..."
     # Keep every workspace (and the root) on the same version — the monorepo is
     # released as one unit, and the bundled packages advertise this number.
-    npm version "$NEW_VERSION" --workspaces --include-workspace-root --git-tag-version=false
-    if [ $? -ne 0 ]; then
+    if ! npm version "$NEW_VERSION" --workspaces --include-workspace-root --git-tag-version=false; then
         echo "Error updating version."
+        # npm version rewrites each workspace in turn, so a mid-way failure
+        # leaves package.json bumped and package-lock.json stale. Say so instead
+        # of leaving the user to discover it.
+        echo "package.json files may already be changed — inspect with:"
+        echo "  git diff --stat package.json package-lock.json packages/*/package.json"
         exit 1
     fi
 fi
