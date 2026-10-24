@@ -17,7 +17,7 @@
  *   node ../../scripts/bundle-package.mjs packages/cli src/cli.ts
  */
 import { build } from 'esbuild';
-import { copyFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -71,5 +71,15 @@ if (existsSync(engineLib)) {
 // LICENSE lives at the repo root; `files: ["LICENSE"]` needs it in the package.
 const license = join(ROOT, 'LICENSE');
 if (existsSync(license)) copyFileSync(license, join(pkgDir, 'LICENSE'));
+
+// The CLI ships the Agent Skills from the repo-root `skills/` directory so
+// `maven-indexer-cli skills install` can copy them; it resolves them as
+// `<dist>/../skills`.
+if (basename(pkgDir) === 'cli') {
+  const skillsSrc = join(ROOT, 'skills');
+  const skillsDest = join(pkgDir, 'skills');
+  rmSync(skillsDest, { recursive: true, force: true });
+  cpSync(skillsSrc, skillsDest, { recursive: true });
+}
 
 console.log(`bundled ${pkgDir}`);
