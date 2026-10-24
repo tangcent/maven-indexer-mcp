@@ -26,7 +26,11 @@ describe('maven-indexer-cli skills', () => {
 
   it('resolves the repo-root skill when running from source', () => {
     expect(path.join(findBundledSkillDir(), 'SKILL.md')).toBe(REPO_SKILL);
-    expect(fs.readFileSync(REPO_SKILL, 'utf-8')).toMatch(/^---\nname: maven-indexer\ndescription: .+\n---\n/);
+    // Normalize CRLF: on Windows, `core.autocrlf=true` (the default there, and
+    // what GitHub's windows runner uses) checks SKILL.md out with CRLF even
+    // though the blob is LF, and this assertion is about the front matter.
+    const content = fs.readFileSync(REPO_SKILL, 'utf-8').replace(/\r\n/g, '\n');
+    expect(content).toMatch(/^---\nname: maven-indexer\ndescription: .+\n---\n/);
   });
 
   it('installs, is idempotent, and uninstalls', () => {
