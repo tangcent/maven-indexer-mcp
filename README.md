@@ -207,7 +207,7 @@ Each tool below names `explore` as the preferred alternative.
 * **`stats`**: Aggregate index statistics (artifact count, class count, db size). Prefer `explore` (no direct equivalent; use `stats` for raw counts).
 * **`list_classes`**: List all distinct Java/protobuf class names indexed for a specific artifact coordinate. Prefer `explore` (pass the coordinate in `identifiers`).
 * **`project_context`**: Inspect the active project's Maven/Gradle context (declared/resolved dependency tree, build file, project coordinate). Useful when version resolution surprises you. Takes required `projectPath`. Prefer `explore` (pass `projectPath`).
-* **`search_artifacts`**: Search for artifacts by coordinate (groupId, artifactId, keyword). Supports batch. Prefer `explore` (pass coordinates in `identifiers`).
+* **`search_artifacts`**: Search for artifacts by groupId, artifactId, keyword, or an exact `groupId:artifactId[:version]` coordinate; newest versions are listed first. Supports batch. Prefer `explore` (pass coordinates in `identifiers`).
 * **`search_resources`**: Search for text resources inside JARs (proto, XML, properties). Prefer `explore` with `include: ["resources"]`.
 * **`search_methods`**: Search for Java methods by name across indexed artifacts. Prefer `explore` (pass `Class.method` in `identifiers`).
 
