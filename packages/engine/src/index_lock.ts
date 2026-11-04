@@ -38,8 +38,10 @@ export function indexLockPath(dbPath: string): string {
  * `MAVEN_INDEXER_INDEX_LOCK_WAIT_MS` (0 = skip immediately).
  */
 export function indexLockWaitMs(): number {
-    const raw = Number(process.env.MAVEN_INDEXER_INDEX_LOCK_WAIT_MS);
-    return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_WAIT_MS;
+    const raw = process.env.MAVEN_INDEXER_INDEX_LOCK_WAIT_MS?.trim();
+    if (!raw) return DEFAULT_WAIT_MS;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= 0 ? value : DEFAULT_WAIT_MS;
 }
 
 function readPayload(lockPath: string): LockPayload | null {
@@ -69,6 +71,14 @@ function isPidAlive(pid: number): boolean {
  * create), or when its heartbeat stopped. The mtime check also covers PID reuse
  * and a hung owner; the owner refreshes it while indexing.
  */
+function payloadIsAbandoned(stat: fs.Stats, payload: LockPayload | null): boolean {
+    if (!payload) {
+        return Date.now() - stat.mtimeMs > WRITE_GRACE_MS;
+    }
+    if (!isPidAlive(payload.pid)) return true;
+    return Date.now() - stat.mtimeMs > STALE_AFTER_MS;
+}
+
 function isStale(lockPath: string): boolean {
     let stat: fs.Stats;
     try {
@@ -76,12 +86,52 @@ function isStale(lockPath: string): boolean {
     } catch {
         return false; // removed by another process; retry the create
     }
-    const payload = readPayload(lockPath);
-    if (!payload) {
-        return Date.now() - stat.mtimeMs > WRITE_GRACE_MS;
+    return payloadIsAbandoned(stat, readPayload(lockPath));
+}
+
+/**
+ * Atomically claims a stale lock by renaming it out of the way. A rename of the
+ * same path succeeds for exactly one process, whereas `unlink` + create lets
+ * two reclaimers delete each other's freshly created lock (and both then think
+ * they own it). After the rename we re-check the file we actually moved: if it
+ * was replaced by a live owner between the staleness check and the rename, put
+ * it back and let the caller wait.
+ */
+function reclaimStale(lockPath: string): boolean {
+    const claimed = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+    try {
+        fs.renameSync(lockPath, claimed);
+    } catch {
+        return false; // another process reclaimed or released it first
     }
-    if (!isPidAlive(payload.pid)) return true;
-    return Date.now() - stat.mtimeMs > STALE_AFTER_MS;
+    try {
+        const stat = fs.statSync(claimed);
+        const payload = readPayload(claimed);
+        if (!payloadIsAbandoned(stat, payload)) {
+            // A live lock was swapped in under us; restore it before its owner
+            // notices and retry as a normal waiter.
+            try {
+                fs.renameSync(claimed, lockPath);
+            } catch {
+                // Someone else already created a lock at the original path.
+                try {
+                    fs.unlinkSync(claimed);
+                } catch {
+                    // Already gone.
+                }
+            }
+            return false;
+        }
+        fs.unlinkSync(claimed);
+        return true;
+    } catch {
+        try {
+            fs.unlinkSync(claimed);
+        } catch {
+            // Already gone.
+        }
+        return false;
+    }
 }
 
 /** Owns the lock file until `release()` is called. */
@@ -153,12 +203,7 @@ export async function acquireIndexLock(dbPath: string, waitMs = indexLockWaitMs(
     for (;;) {
         const lock = tryCreate(lockPath);
         if (lock) return lock;
-        if (isStale(lockPath)) {
-            try {
-                fs.unlinkSync(lockPath);
-            } catch {
-                // Another process removed it first.
-            }
+        if (isStale(lockPath) && reclaimStale(lockPath)) {
             // Retry the create right away: reclaiming a stale lock is not a
             // wait, and with waitMs = 0 we must still succeed on this attempt.
             const reclaimed = tryCreate(lockPath);

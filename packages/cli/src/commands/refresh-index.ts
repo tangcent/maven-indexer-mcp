@@ -39,7 +39,7 @@ export async function run(opts: { quick?: boolean; full?: boolean; watch?: boole
     setInterval(() => {}, 1 << 30);
   } else {
     process.stdout.write(skipped
-      ? 'Index refresh skipped: another maven-indexer process is indexing the shared database.\n'
+      ? 'Index refresh skipped: another indexing pass is already running (in this process or another maven-indexer process).\n'
       : 'Index refresh complete.\n');
     process.exit(0);
   }

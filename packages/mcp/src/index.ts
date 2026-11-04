@@ -160,17 +160,35 @@ const server = new McpServer(
 
 // Start indexing in the background
 const indexer = Indexer.getInstance();
+
+/**
+ * An initial pass that is skipped because another session owns the shared index
+ * lock must be retried: if that other process crashes or its pass fails, this
+ * server would otherwise serve an empty/partial index until the hourly schedule
+ * fires. Bounded so a permanently busy indexer does not spawn endless scans.
+ */
+const INITIAL_INDEX_RETRY_MS = 60_000;
+const INITIAL_INDEX_MAX_ATTEMPTS = 10;
+
+async function runInitialIndex(): Promise<void> {
+  for (let attempt = 1; attempt <= INITIAL_INDEX_MAX_ATTEMPTS; attempt++) {
+    const result = await indexer.index();
+    if (!result.skipped) return;
+    if (attempt === INITIAL_INDEX_MAX_ATTEMPTS) {
+      console.error("Another maven-indexer process is still indexing the shared database; the scheduled reindex will retry later.");
+      return;
+    }
+    console.error(`Another maven-indexer process is indexing the shared database; retrying this pass in ${INITIAL_INDEX_RETRY_MS / 1000}s.`);
+    await new Promise<void>(resolve => setTimeout(resolve, INITIAL_INDEX_RETRY_MS));
+  }
+}
+
 // We trigger indexing but don't await it so server can start. The watcher and
-// scheduled reindex must start even when the initial pass fails (or is skipped
-// because another agent already holds the index lock), otherwise the server
-// would never recover its index.
-indexer.index()
-  .catch(err => console.error("Initial indexing failed:", err))
-  .then(() => {
-    indexer.startSchedule();
-    return indexer.startWatch();
-  })
-  .catch(err => console.error("Failed to start background jobs:", err));
+// scheduled reindex start immediately: a skipped or failed initial pass must
+// not prevent them from starting, or this server would never recover its index.
+indexer.startSchedule();
+indexer.startWatch().catch(err => console.error("Failed to start watcher:", err));
+runInitialIndex().catch(err => console.error("Initial indexing failed:", err));
 
 // ---------------------------------------------------------------------------
 // Gating: register tools conditionally per MAVEN_INDEXER_MCP_TOOLS (Req 2).

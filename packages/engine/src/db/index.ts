@@ -260,20 +260,37 @@ export class DB {
   }
 
   private runMigrations() {
-    const current = this.db.pragma('user_version', { simple: true }) as number;
+    const applied = this.db.pragma('user_version', { simple: true }) as number;
+    if (MIGRATIONS.every(m => m.version <= applied)) return;
+
     for (const m of MIGRATIONS) {
-      if (m.version <= current) continue;
       // IMMEDIATE takes the write lock up front. A deferred BEGIN that reads
       // before writing can fail with SQLITE_BUSY_SNAPSHOT in WAL mode, which a
       // busy timeout cannot retry.
       this.db.exec('BEGIN IMMEDIATE');
       try {
+        // Re-read inside the lock: another process may have applied this (or
+        // all) migrations while we waited for busy_timeout. A version read
+        // before the wait is stale, and replaying a non-idempotent step (e.g.
+        // ALTER TABLE ... ADD COLUMN) fails *and* leaves user_version pointing
+        // at the wrong schema version.
+        const current = this.db.pragma('user_version', { simple: true }) as number;
+        if (m.version <= current) {
+          this.db.exec('COMMIT');
+          continue;
+        }
         this.db.exec(m.sql);
         if (m.after) m.after(this.db);
         this.db.pragma(`user_version = ${m.version}`);
         this.db.exec('COMMIT');
       } catch (e) {
-        this.db.exec('ROLLBACK');
+        // SQLite may already have rolled the transaction back (e.g. on a
+        // constraint or IO error); never mask the original failure.
+        try {
+          this.db.exec('ROLLBACK');
+        } catch {
+          // Already rolled back.
+        }
         throw new Error(`Migration v${m.version} (${m.name}) failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }

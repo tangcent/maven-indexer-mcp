@@ -124,8 +124,9 @@ export interface ImpactResult {
  * - updated: existing artifacts re-indexed (mtime changed or full-scan reset)
  * - pruned:  artifacts deleted because their JAR no longer exists
  * - durationMs: wall-clock duration of the run
- * - skipped: true when another process holds the index lock and this pass
- *   deliberately did nothing (all counters are 0)
+ * - skipped: true when this call deliberately did no work because another pass
+ *   is already running (in this process or another process holding the index
+ *   lock); all counters are 0
  */
 export interface RefreshResult {
     scanned: number;
@@ -389,6 +390,13 @@ export class Indexer {
         } finally {
             this.indexLock = null;
             lock.release();
+            // A watcher/scheduler pass that arrived while the lock was held was
+            // queued by index(); run it now that the rebuild is done, otherwise
+            // it would wait for the hourly schedule.
+            if (this.pendingReindex) {
+                this.pendingReindex = false;
+                this.index().catch(e => console.error("Pending reindex failed", e));
+            }
         }
     }
 
@@ -501,13 +509,17 @@ export class Indexer {
         if (this.isIndexing) {
             // Coalesce: queue at most one follow-up pass (T3.1).
             this.pendingReindex = true;
-            return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0 };
+            return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0, skipped: true };
         }
         // `this.indexLock` without an owned lock means refresh() holds it for
         // its shadow pass. Only that nested call may reuse it; other passes
         // must not write on top of the rebuild (which already covers them).
         if (this.indexLock && !opts.shadow) {
-            return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0 };
+            // Queue it instead of dropping it: refresh() drains this request
+            // once it releases the lock, so a change seen after the shadow
+            // scan is not lost until the next hourly pass.
+            this.pendingReindex = true;
+            return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0, skipped: true };
         }
         const startTime = Date.now();
         this.isIndexing = true;

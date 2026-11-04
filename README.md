@@ -254,10 +254,11 @@ Example with optional configuration:
 
 All MCP servers and CLI commands on a machine use the same SQLite file, so opening several agent
 sessions does not create several indexes. Only one process runs an index pass at a time: the others
-log `skipping this pass` and read the index that the first process is building. A lock left behind
-by a crashed process is reclaimed automatically. If you still see `database is locked`, check that
-no older version of `maven-indexer-mcp` is still running, or point the sessions at different
-`DB_FILE` values.
+log `skipping this pass` and read the index that the first process is building. A session whose
+startup pass is skipped retries in the background for a few minutes, so a crashed owner cannot leave
+it with an empty index until the next hourly reindex. A lock left behind by a crashed process is
+reclaimed automatically. If you still see `database is locked`, check that no older version of
+`maven-indexer-mcp` is still running, or point the sessions at different `DB_FILE` values.
 
 ## Available Tools
 

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { spawn, ChildProcess } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+import { buildSync } from 'esbuild';
 import { Indexer, Config, DB, acquireIndexLock, indexLockPath } from '@maven-indexer/engine';
 import { buildArtifact, createTempWorkspace } from './helpers/fixture.js';
 
@@ -123,6 +125,97 @@ describe('concurrent indexing against a shared DB', () => {
     // index() released its own lock; the recovered one must not delete it.
     recovered!.release();
     expect(fs.existsSync(lockPath)).toBe(false);
+    // Reclaiming uses an atomic rename; no scratch files may be left behind.
+    expect(fs.readdirSync(tmpDir).filter(f => f.includes('.stale-'))).toEqual([]);
+  });
+
+  it('migrates a brand-new shared DB from several processes without a version race', async () => {
+    // Bundling the engine source lets child processes run the real DB
+    // constructor (open + migrate) instead of a copy of the migration logic.
+    const bundleDir = path.resolve(__dirname, '..', '.test-tmp');
+    fs.mkdirSync(bundleDir, { recursive: true });
+    const bundle = path.join(bundleDir, `engine-${process.pid}-${Date.now()}.mjs`);
+    buildSync({
+      entryPoints: [path.resolve(__dirname, '..', 'packages', 'engine', 'src', 'index.ts')],
+      outfile: bundle,
+      bundle: true,
+      format: 'esm',
+      platform: 'node',
+      packages: 'external',
+      logLevel: 'silent',
+    });
+    const freshDb = path.join(tmpDir, 'fresh.sqlite');
+
+    // Seed a genuine v3 database with enough artifact rows that migration v4's
+    // backfill takes long enough for every child to read user_version = 3
+    // before the first one commits. That is exactly the window in which two
+    // processes used to replay "ALTER TABLE artifacts ADD COLUMN layout".
+    const seed = DB.getInstance(freshDb);
+    const raw = seed.getDb();
+    raw.exec('ALTER TABLE artifacts DROP COLUMN layout');
+    raw.exec(`
+      DROP TABLE IF EXISTS meta;
+      DROP TABLE IF EXISTS methods;
+      DROP TABLE IF EXISTS artifact_dir_mtimes;
+      DROP TABLE IF EXISTS dependencies;
+      DROP TABLE IF EXISTS call_edges;
+    `);
+    raw.pragma('user_version = 3');
+    const insert = raw.prepare(
+      'INSERT INTO artifacts (group_id, artifact_id, version, abspath, has_source, is_indexed) VALUES (?, ?, ?, ?, 0, 1)'
+    );
+    raw.transaction(() => {
+      for (let i = 0; i < 100_000; i++) {
+        insert.run('com.example', `seed-${i}`, '1.0.0', `/maven/com/example/seed-${i}/1.0.0/seed-${i}.jar`);
+      }
+    })();
+    seed.close();
+    DB.reset();
+
+    const barrierDir = path.join(tmpDir, 'barrier');
+    fs.mkdirSync(barrierDir);
+    const processes = 4;
+
+    const childScript = `
+      const fs = require('fs');
+      const path = require('path');
+      (async () => {
+        const [engineUrl, dbFile, barrier, countRaw] = process.argv.slice(1);
+        const engine = await import(engineUrl);
+        fs.writeFileSync(path.join(barrier, String(process.pid)), 'ready');
+        const deadline = Date.now() + 10_000;
+        while (fs.readdirSync(barrier).length < Number(countRaw)) {
+          if (Date.now() > deadline) throw new Error('barrier timeout');
+        }
+        engine.DB.getInstance(dbFile);
+        process.exit(0);
+      })().catch(e => { console.error(e.message); process.exit(1); });
+    `;
+    const children = Array.from({ length: processes }, () =>
+      spawn(
+        process.execPath,
+        ['-e', childScript, pathToFileURL(bundle).href, freshDb, barrierDir, String(processes)],
+        { cwd: path.resolve(__dirname, '..'), stdio: ['ignore', 'ignore', 'pipe'] },
+      )
+    );
+    const stderr: string[] = [];
+    children.forEach((c, i) => c.stderr!.on('data', d => { stderr[i] = (stderr[i] ?? '') + d; }));
+
+    try {
+      const codes = await Promise.all(children.map(c => new Promise<number>(resolve => c.on('exit', code => resolve(code ?? 1)))));
+      if (codes.some(code => code !== 0)) {
+        throw new Error(`child process failed to migrate: ${stderr.join(' | ')}`);
+      }
+      expect(codes).toEqual(new Array(processes).fill(0));
+
+      // Opening the DB afterwards must not replay a non-idempotent migration.
+      const db = DB.getInstance(freshDb);
+      expect(db.getDb().pragma('user_version', { simple: true })).toBe(9);
+      const columns = db.prepare('PRAGMA table_info(artifacts)').all() as { name: string }[];
+      expect(columns.filter(c => c.name === 'layout')).toHaveLength(1);
+    } finally {
+      fs.rmSync(bundleDir, { recursive: true, force: true });
+    }
   });
 
   it('keeps a live lock fresh via heartbeat and never deletes a taken-over lock', async () => {
