@@ -22,6 +22,7 @@ export interface SyncOpts extends GlobalOpts {
  * Output:
  *   default (text): `Synced: 142 artifacts scanned, 3 added, 1 updated, 0 pruned in 327ms`
  *   --json:         `{ "scanned": 142, "added": 3, "updated": 1, "pruned": 0, "durationMs": 327 }`
+ *   skipped pass:   another process holds the index lock; all counters are 0 and `skipped` is true
  *   --quiet:        no stdout on success; errors still go to stderr + non-zero exit
  */
 export async function run(opts: SyncOpts): Promise<void> {
@@ -50,6 +51,8 @@ export async function run(opts: SyncOpts): Promise<void> {
 
   if (opts.json) {
     process.stdout.write(JSON.stringify(result) + '\n');
+  } else if (result.skipped) {
+    process.stdout.write('Sync skipped: another maven-indexer process is indexing the shared database.\n');
   } else {
     process.stdout.write(
       `Synced: ${result.scanned} artifacts scanned, ${result.added} added, ${result.updated} updated, ${result.pruned} pruned in ${result.durationMs}ms\n`

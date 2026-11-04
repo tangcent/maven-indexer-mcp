@@ -19,6 +19,8 @@ import {
     EXCLUDED_CLASSIFIERS,
 } from './path_helpers.js';
 import { escapeLike, likeContains, buildFtsQuery, compileUserRegex } from './sql_helpers.js';
+import { resolveDbPath } from './constants.js';
+import { acquireIndexLock, IndexLock } from './index_lock.js';
 
 export interface Artifact {
     id: number;
@@ -122,6 +124,8 @@ export interface ImpactResult {
  * - updated: existing artifacts re-indexed (mtime changed or full-scan reset)
  * - pruned:  artifacts deleted because their JAR no longer exists
  * - durationMs: wall-clock duration of the run
+ * - skipped: true when another process holds the index lock and this pass
+ *   deliberately did nothing (all counters are 0)
  */
 export interface RefreshResult {
     scanned: number;
@@ -129,6 +133,7 @@ export interface RefreshResult {
     updated: number;
     pruned: number;
     durationMs: number;
+    skipped?: boolean;
 }
 
 /**
@@ -147,6 +152,8 @@ export class Indexer {
     private shadowMode: boolean = false;
     /** Number of classes skipped during the current/last indexing run due to EXCLUDED_PACKAGES. */
     private skippedByExcludes: number = 0;
+    /** Held for the whole pass (refresh() shares it with its nested index()). */
+    private indexLock: IndexLock | null = null;
 
     private constructor() {
     }
@@ -363,6 +370,30 @@ export class Indexer {
      * On failure, old index is left untouched.
      */
     public async refresh(opts: { quickScan?: boolean; groupIdPrefix?: string } = {}): Promise<RefreshResult> {
+        // A shadow rebuild cannot run on top of another pass in this process.
+        if (this.isIndexing || this.indexLock) {
+            console.error("An indexing pass is already running; skipping refresh.");
+            return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0, skipped: true };
+        }
+        // Acquire before any DDL: a refresh resets is_indexed and swaps tables,
+        // so a skipped pass must leave the database completely untouched.
+        // index() reuses the lock this method holds for its nested shadow pass.
+        const lock = await acquireIndexLock(resolveDbPath());
+        if (!lock) {
+            console.error("Another maven-indexer process is indexing this database; skipping refresh.");
+            return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0, skipped: true };
+        }
+        this.indexLock = lock;
+        try {
+            return await this.doRefresh(opts);
+        } finally {
+            this.indexLock = null;
+            lock.release();
+        }
+    }
+
+    /** Body of refresh(); runs only while the index lock is held. */
+    private async doRefresh(opts: { quickScan?: boolean; groupIdPrefix?: string }): Promise<RefreshResult> {
         const db = DB.getInstance();
         console.error("Refreshing index (shadow-table mode)...");
 
@@ -472,6 +503,12 @@ export class Indexer {
             this.pendingReindex = true;
             return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0 };
         }
+        // `this.indexLock` without an owned lock means refresh() holds it for
+        // its shadow pass. Only that nested call may reuse it; other passes
+        // must not write on top of the rebuild (which already covers them).
+        if (this.indexLock && !opts.shadow) {
+            return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0 };
+        }
         const startTime = Date.now();
         this.isIndexing = true;
         this.shadowMode = opts.shadow ?? false;
@@ -482,8 +519,22 @@ export class Indexer {
         let scanned = 0;
         let added = 0;
         let pruned = 0;
+        let ownedLock = false;
 
         try {
+            // Only one process may scan/write the shared index at a time. The
+            // lock is held for the whole pass, including the file scan; a pass
+            // that cannot get it skips instead of colliding on SQLite writes.
+            if (!this.indexLock) {
+                const lock = await acquireIndexLock(resolveDbPath());
+                if (!lock) {
+                    console.error("Another maven-indexer process is indexing this database; skipping this pass.");
+                    return { scanned: 0, added: 0, updated: 0, pruned: 0, durationMs: 0, skipped: true };
+                }
+                this.indexLock = lock;
+                ownedLock = true;
+            }
+
             const config = await Config.getInstance();
             const repoPath = config.localRepository;
             const gradleRepoPath = config.gradleRepository;
@@ -690,6 +741,8 @@ export class Indexer {
 
             for (let i = 0; i < artifactsToIndex.length; i += CHUNK_SIZE) {
                 const chunk = artifactsToIndex.slice(i, i + CHUNK_SIZE);
+                // Keep the cross-process lock fresh during long synchronous work.
+                this.indexLock?.beat();
                 await Promise.all(chunk.map(artifact => this.indexArtifactClasses(artifact)));
                 processedCount += chunk.length;
 
@@ -729,6 +782,10 @@ export class Indexer {
             console.error("Indexing failed", e);
             throw e; // propagate to caller
         } finally {
+            if (ownedLock) {
+                this.indexLock?.release();
+                this.indexLock = null;
+            }
             this.isIndexing = false;
             this.shadowMode = false;
             // Drain a coalesced reindex request (T3.1). Only one follow-up

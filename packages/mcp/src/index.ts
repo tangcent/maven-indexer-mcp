@@ -160,12 +160,17 @@ const server = new McpServer(
 
 // Start indexing in the background
 const indexer = Indexer.getInstance();
-// We trigger indexing but don't await it so server can start
-indexer.index().then(() => {
-    // Start watching for changes after initial index
+// We trigger indexing but don't await it so server can start. The watcher and
+// scheduled reindex must start even when the initial pass fails (or is skipped
+// because another agent already holds the index lock), otherwise the server
+// would never recover its index.
+indexer.index()
+  .catch(err => console.error("Initial indexing failed:", err))
+  .then(() => {
     indexer.startSchedule();
     return indexer.startWatch();
-}).catch(err => console.error("Initial indexing failed:", err));
+  })
+  .catch(err => console.error("Failed to start background jobs:", err));
 
 // ---------------------------------------------------------------------------
 // Gating: register tools conditionally per MAVEN_INDEXER_MCP_TOOLS (Req 2).
