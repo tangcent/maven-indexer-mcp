@@ -9,6 +9,7 @@ export type { ClassDetail } from './source_parser.js';
 export { Config } from './config.js';
 export type { VersionStrategy } from './config.js';
 export { DB } from './db/index.js';
+export { acquireIndexLock, IndexLock, indexLockPath, indexLockWaitMs, INDEX_LOCK_SUFFIX } from './index_lock.js';
 export { PomParser } from './pom_parser.js';
 export type { Dependency as PomDependency, PomInfo } from './pom_parser.js';
 export { ProtoParser } from './proto_parser.js';

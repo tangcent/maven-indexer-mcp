@@ -14,6 +14,9 @@ import type { Database as DBType } from 'better-sqlite3';
 let Database: typeof DatabaseType | null = null;
 let dbLoadError: string | null = null;
 
+/** How long a connection waits for a write lock held by another process. */
+const BUSY_TIMEOUT_MS = 30_000;
+
 try {
   Database = require('better-sqlite3');
 } catch (e: any) {
@@ -192,8 +195,18 @@ export class DB {
     }
 
     this.db = new Database(this.currentPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('busy_timeout = 5000');
+    // The MCP server and the CLI share one DB file, and several agent sessions
+    // may start at the same time. Set the busy handler *before* any pragma that
+    // needs a lock so a second process waits instead of failing with SQLITE_BUSY.
+    // 5s was not enough for a first pass over a large local repository.
+    this.db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    // WAL mode is persisted in the DB header. Re-issuing `journal_mode = WAL`
+    // on every startup asks SQLite for an exclusive lock and is itself a common
+    // source of "database is locked" when another process is indexing.
+    const journalMode = String(this.db.pragma('journal_mode', { simple: true })).toLowerCase();
+    if (journalMode !== 'wal') {
+      this.db.pragma('journal_mode = WAL');
+    }
     this.initSchema();
     this.runMigrations();
   }
@@ -247,17 +260,37 @@ export class DB {
   }
 
   private runMigrations() {
-    const current = this.db.pragma('user_version', { simple: true }) as number;
+    const applied = this.db.pragma('user_version', { simple: true }) as number;
+    if (MIGRATIONS.every(m => m.version <= applied)) return;
+
     for (const m of MIGRATIONS) {
-      if (m.version <= current) continue;
-      this.db.exec('BEGIN');
+      // IMMEDIATE takes the write lock up front. A deferred BEGIN that reads
+      // before writing can fail with SQLITE_BUSY_SNAPSHOT in WAL mode, which a
+      // busy timeout cannot retry.
+      this.db.exec('BEGIN IMMEDIATE');
       try {
+        // Re-read inside the lock: another process may have applied this (or
+        // all) migrations while we waited for busy_timeout. A version read
+        // before the wait is stale, and replaying a non-idempotent step (e.g.
+        // ALTER TABLE ... ADD COLUMN) fails *and* leaves user_version pointing
+        // at the wrong schema version.
+        const current = this.db.pragma('user_version', { simple: true }) as number;
+        if (m.version <= current) {
+          this.db.exec('COMMIT');
+          continue;
+        }
         this.db.exec(m.sql);
         if (m.after) m.after(this.db);
         this.db.pragma(`user_version = ${m.version}`);
         this.db.exec('COMMIT');
       } catch (e) {
-        this.db.exec('ROLLBACK');
+        // SQLite may already have rolled the transaction back (e.g. on a
+        // constraint or IO error); never mask the original failure.
+        try {
+          this.db.exec('ROLLBACK');
+        } catch {
+          // Already rolled back.
+        }
         throw new Error(`Migration v${m.version} (${m.name}) failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
@@ -276,7 +309,10 @@ export class DB {
   }
 
   public transaction<T>(fn: () => T): T {
-    return this.db.transaction(fn)();
+    // All transactions in this codebase write. Using BEGIN IMMEDIATE avoids the
+    // WAL "database is locked" upgrade failure and makes competition with other
+    // processes obey busy_timeout instead of failing instantly.
+    return this.db.transaction(fn).immediate();
   }
 
   public close() {

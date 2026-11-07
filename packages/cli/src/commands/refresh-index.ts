@@ -7,12 +7,12 @@ export async function run(opts: { quick?: boolean; full?: boolean; watch?: boole
 
   const indexer = Indexer.getInstance();
 
+  let skipped = false;
   try {
-    if (opts.full) {
-      await indexer.refresh({ quickScan: false });
-    } else {
-      await indexer.refresh({ quickScan: true });
-    }
+    const result = opts.full
+      ? await indexer.refresh({ quickScan: false })
+      : await indexer.refresh({ quickScan: true });
+    skipped = Boolean(result.skipped);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     process.stderr.write(`Index refresh failed: ${message}\n`);
@@ -38,7 +38,9 @@ export async function run(opts: { quick?: boolean; full?: boolean; watch?: boole
     // Keep the process alive
     setInterval(() => {}, 1 << 30);
   } else {
-    process.stdout.write('Index refresh complete.\n');
+    process.stdout.write(skipped
+      ? 'Index refresh skipped: another indexing pass is already running (in this process or another maven-indexer process).\n'
+      : 'Index refresh complete.\n');
     process.exit(0);
   }
 }
