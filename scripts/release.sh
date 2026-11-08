@@ -12,6 +12,40 @@ cd "$PROJECT_ROOT" || exit 1
 MCP_PKG="maven-indexer-mcp"
 CLI_PKG="maven-indexer-cli"
 
+# npm auth. Publishing without a valid token fails with a bare
+# "E404 Not Found - PUT https://registry.npmjs.org/<pkg>" — the registry hides
+# "you are not allowed to publish this" behind a 404. Checking up front turns
+# that into an explicit prompt before anything gets bumped.
+npm_logged_in() {
+    npm whoami >/dev/null 2>&1
+}
+
+ensure_npm_login() {
+    local user
+    if user=$(npm whoami 2>/dev/null); then
+        echo "npm: logged in as $user"
+        return 0
+    fi
+
+    echo "npm: not logged in (npm whoami failed) — publishing would fail with E404."
+    read -p "Log in to npm now? (Y/n) " LOGIN_NOW
+    if [[ -n "$LOGIN_NOW" && ! "$LOGIN_NOW" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+        echo "Aborted — run 'npm login' first, then re-run this script."
+        exit 1
+    fi
+
+    if ! npm login; then
+        echo "npm login failed."
+        exit 1
+    fi
+
+    if ! user=$(npm whoami 2>/dev/null); then
+        echo "Still not logged in after 'npm login' — check ~/.npmrc and your token."
+        exit 1
+    fi
+    echo "npm: logged in as $user"
+}
+
 read_version() {
     node -p "require('./packages/$1/package.json').version"
 }
@@ -43,6 +77,11 @@ npm_has_version() {
     return 2
 }
 
+# 0. Auth comes first: a broken token must never leave the repo bumped and
+#    unpublished.
+ensure_npm_login
+echo ""
+
 # 1. Read both published versions
 MCP_VERSION=$(read_version mcp)
 CLI_VERSION=$(read_version cli)
@@ -53,10 +92,11 @@ echo "  $CLI_PKG  $CLI_VERSION"
 
 # 2. Detect a half-finished release
 #    A partial publish leaves the two packages on different versions — or, when
-#    the bump already happened locally, leaves one version missing on npm even
-#    though both package.json files agree. Either way the fix is the same:
-#    republish the lagging package at the higher version, without bumping.
+#    the bump already happened locally, leaves one or both versions missing on
+#    npm even though both package.json files agree. The fix is always the same:
+#    publish what is missing at the current version, without bumping.
 REPAIR_PKG=""
+REPAIR_ALL=0
 REPAIR_REASON=""
 
 case "$(version_compare "$MCP_VERSION" "$CLI_VERSION")" in
@@ -90,7 +130,11 @@ if [ -z "$REPAIR_PKG" ]; then
     elif [ "$MCP_ON_NPM" -eq 2 ] || [ "$CLI_ON_NPM" -eq 2 ]; then
         echo "  Registry check inconclusive — republish option disabled."
     elif [ "$MCP_ON_NPM" -eq 1 ] && [ "$CLI_ON_NPM" -eq 1 ]; then
+        # Bumped locally but nothing reached npm — the whole release has to
+        # ship at the current version, not one patch further.
         echo "  Neither package has $BASE_VERSION on npm yet."
+        REPAIR_ALL=1
+        REPAIR_REASON="neither package has $BASE_VERSION on npm (release never landed)"
     else
         echo "  Both present on npm."
     fi
@@ -110,7 +154,12 @@ NEXT_MAJOR="$((MAJOR + 1)).0.0"
 echo ""
 echo "Select a new version to release:"
 N=1
-if [ -n "$REPAIR_PKG" ]; then
+if [ "$REPAIR_ALL" -eq 1 ]; then
+    echo "  $N) Publish $BASE_VERSION as-is (no version bump)"
+    echo "       $REPAIR_REASON"
+    N=$((N + 1))
+    OFFSET=1
+elif [ -n "$REPAIR_PKG" ]; then
     echo "  $N) Republish $REPAIR_PKG@$BASE_VERSION (no version bump)"
     echo "       $REPAIR_REASON"
     N=$((N + 1))
@@ -166,7 +215,10 @@ else
 fi
 
 echo ""
-if [ "$MODE" = "republish" ]; then
+if [ "$MODE" = "republish" ] && [ "$REPAIR_ALL" -eq 1 ]; then
+    echo "You are about to PUBLISH $NEW_VERSION (both packages) — no version bump,"
+    echo "the local versions are already at $NEW_VERSION."
+elif [ "$MODE" = "republish" ]; then
     echo "You are about to REPUBLISH $REPAIR_PKG@$NEW_VERSION — no version bump,"
     echo "no other package is touched."
 else
@@ -179,7 +231,12 @@ if [[ ! "$CONFIRM" =~ ^([yY][eE][sS]|[yY])$ ]]; then
 fi
 
 # 5. Apply the version change
-if [ "$MODE" = "republish" ]; then
+if [ "$MODE" = "republish" ] && [ "$REPAIR_ALL" -eq 1 ]; then
+    # Both workspaces are already on $NEW_VERSION — only publishing is missing.
+    PUBLISH_TARGETS=("$MCP_PKG" "$CLI_PKG")
+    echo ""
+    echo "Local versions already at $NEW_VERSION — nothing to align."
+elif [ "$MODE" = "republish" ]; then
     PUBLISH_TARGETS=("$REPAIR_PKG")
     echo ""
     echo "Aligning $REPAIR_PKG to $NEW_VERSION..."
@@ -232,7 +289,10 @@ done
 if [ "$PUBLISH_RC" -ne 0 ]; then
     echo ""
     echo "Publish failed."
-    echo "Re-run this script — the republish option will pick up the gap."
+    echo "Re-run this script — it detects what is still missing on npm and offers"
+    echo "to publish it without bumping the version."
+    echo "If the error was E404 on PUT, the npm user above cannot publish that"
+    echo "package (wrong account or expired token) — check with 'npm whoami'."
     exit 1
 fi
 
