@@ -316,4 +316,28 @@ if [[ "$GIT_TAG" =~ ^([yY][eE][sS]|[yY])$ ]]; then
     fi
 
     git push && git push --tags
+    if [ $? -ne 0 ]; then
+        echo "Push failed — no GitHub release created."
+        echo "Once the push succeeds, create it with:"
+        echo "  gh release create v$NEW_VERSION --title v$NEW_VERSION --generate-notes"
+        exit 1
+    fi
+
+    # GitHub release. The tag is pushed right here, so "tag already exists" is
+    # no evidence a release exists — the old tag-based workflow never fired.
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "gh not installed — create the release manually:"
+        echo "  gh release create v$NEW_VERSION --title v$NEW_VERSION --generate-notes"
+    elif gh release view "v$NEW_VERSION" >/dev/null 2>&1; then
+        echo "GitHub release v$NEW_VERSION already exists."
+    else
+        echo ""
+        echo "Creating GitHub release v$NEW_VERSION..."
+        if gh release create "v$NEW_VERSION" --title "v$NEW_VERSION" --generate-notes; then
+            echo "Release: $(gh release view "v$NEW_VERSION" --json url --jq .url)"
+        else
+            echo "Failed to create the GitHub release. Retry with:"
+            echo "  gh release create v$NEW_VERSION --title v$NEW_VERSION --generate-notes"
+        fi
+    fi
 fi
