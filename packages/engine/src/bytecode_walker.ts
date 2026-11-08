@@ -133,8 +133,17 @@ export function walkInvokeEdges(
 ): CallEdge[] {
     const edges: CallEdge[] = [];
     let pc = 0;
+    // Every iteration must consume at least one byte. Cap the step count so a
+    // malformed instruction length can never loop forever appending edges until
+    // the process runs out of heap.
+    const maxSteps = code.length + 1;
+    let steps = 0;
 
     while (pc < code.length) {
+        if (++steps > maxSteps) {
+            console.error(`bytecode_walker: instruction pointer stopped advancing at pc=${pc} in ${callerClass}.${callerMethod}; returning ${edges.length} partial edges`);
+            break;
+        }
         const opcode = code.readUInt8(pc);
         const len = OPCODE_LENGTH[opcode];
 
@@ -263,6 +272,16 @@ function safeReadU2(buf: Buffer, offset: number): number | undefined {
     return buf.readUInt16BE(offset);
 }
 
+/**
+ * Absolute next pc, guaranteed to be greater than `pc` (or `codeLength` to
+ * stop walking). A backwards jump would re-walk the same instructions forever
+ * and grow `edges` without bound, which is how a single `wide` instruction used
+ * to OOM the whole indexing process.
+ */
+function forwardPc(pc: number, target: number, codeLength: number): number {
+    return target > pc ? Math.min(target, codeLength) : codeLength;
+}
+
 function skipTableSwitch(code: Buffer, pc: number): number {
     const base = pc + 1;
     const pad = (4 - (base % 4)) % 4;
@@ -272,7 +291,7 @@ function skipTableSwitch(code: Buffer, pc: number): number {
     const high = code.readInt32BE(defaultStart + 8);
     const offsetsCount = high - low + 1;
     const end = defaultStart + 12 + offsetsCount * 4;
-    return Math.min(end, code.length);
+    return forwardPc(pc, end, code.length);
 }
 
 function skipLookupSwitch(code: Buffer, pc: number): number {
@@ -282,11 +301,12 @@ function skipLookupSwitch(code: Buffer, pc: number): number {
     if (defaultStart + 8 > code.length) return code.length;
     const npairs = code.readInt32BE(defaultStart + 4);
     const end = defaultStart + 8 + npairs * 8;
-    return Math.min(end, code.length);
+    return forwardPc(pc, end, code.length);
 }
 
 function skipWide(code: Buffer, pc: number): number {
     if (pc + 1 >= code.length) return code.length;
     const widened = code.readUInt8(pc + 1);
-    return widened === OP_IINC ? 6 : 4;
+    // `wide iinc` is 6 bytes, every other widened instruction is 4 bytes.
+    return forwardPc(pc, pc + (widened === OP_IINC ? 6 : 4), code.length);
 }
