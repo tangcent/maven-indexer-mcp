@@ -210,7 +210,7 @@ describe('concurrent indexing against a shared DB', () => {
 
       // Opening the DB afterwards must not replay a non-idempotent migration.
       const db = DB.getInstance(freshDb);
-      expect(db.getDb().pragma('user_version', { simple: true })).toBe(9);
+      expect(db.getDb().pragma('user_version', { simple: true })).toBe(10);
       const columns = db.prepare('PRAGMA table_info(artifacts)').all() as { name: string }[];
       expect(columns.filter(c => c.name === 'layout')).toHaveLength(1);
     } finally {

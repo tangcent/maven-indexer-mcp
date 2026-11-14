@@ -171,6 +171,8 @@ describe('Shadow-table refresh (T4.1, T4.2, T4.5, T4.16)', () => {
 
         // No _new tables linger after a successful swap.
         const db = DB.getInstance().getDb();
+        const edgeIndexes = db.prepare('PRAGMA index_list(call_edges)').all() as { name: string }[];
+        expect(edgeIndexes.map(index => index.name)).toContain('idx_call_edges_artifact');
         const newTables = db.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_new'",
         ).all() as { name: string }[];
