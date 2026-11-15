@@ -256,12 +256,15 @@ function pickProjectArtifact(
   }
 
   // Only fall back to "whatever version we found" when the tree's own version
-  // is genuinely unavailable in the index.
+  // is genuinely unavailable in the index. The exact lookup is limited to the
+  // artifacts that hold the class: any other dependency in the tree (the
+  // project itself, a sibling library) cannot serve it.
   const fromTree = (map: Map<string, string>): Artifact | undefined => {
     if (!lookupExact) return undefined;
-    for (const [key, version] of map) {
-      const [g, a] = key.split(':');
-      const exact = lookupExact(g, a, version);
+    for (const a of matching) {
+      const version = map.get(`${a.groupId}:${a.artifactId}`);
+      if (!version) continue;
+      const exact = lookupExact(a.groupId, a.artifactId, version);
       if (exact) return exact;
     }
     return undefined;
