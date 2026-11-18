@@ -21,6 +21,7 @@ import {
 import { escapeLike, likeContains, buildFtsQuery, compileUserRegex } from './sql_helpers.js';
 import { resolveDbPath } from './constants.js';
 import { acquireIndexLock, IndexLock } from './index_lock.js';
+import { pruneArtifacts } from './artifact_pruning.js';
 
 export interface Artifact {
     id: number;
@@ -473,6 +474,7 @@ export class Indexer {
                 db.exec('CREATE INDEX IF NOT EXISTS idx_dependencies_dep ON dependencies(dep_group_id, dep_artifact_id)');
                 db.exec('CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_class, caller_method)');
                 db.exec('CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_class, callee_method)');
+                db.exec('CREATE INDEX IF NOT EXISTS idx_call_edges_artifact ON call_edges(artifact_id)');
                 db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed_at', ?)").run(new Date().toISOString());
                 db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_skipped_by_excludes', ?)").run(String(this.skippedByExcludes));
             });
@@ -713,24 +715,7 @@ export class Indexer {
                 }
                 if (artifactsToDelete.length > 0) {
                     console.error(`Pruning ${artifactsToDelete.length} artifacts with missing JARs...`);
-                    db.transaction(() => {
-                        const deleteArtifactsStmt = db.prepare('DELETE FROM artifacts WHERE id = ?');
-                        const deleteClassesStmt = db.prepare('DELETE FROM classes_fts WHERE artifact_id = ?');
-                        const deleteInheritanceStmt = db.prepare('DELETE FROM inheritance WHERE artifact_id = ?');
-                        const deleteResourcesStmt = db.prepare('DELETE FROM resources WHERE artifact_id = ?');
-                        const deleteResourceClassesStmt = db.prepare('DELETE FROM resource_classes WHERE resource_id IN (SELECT id FROM resources WHERE artifact_id = ?)');
-                        const deleteCallEdgesStmt = db.prepare('DELETE FROM call_edges WHERE artifact_id = ?');
-                        const deleteMtimesStmt = db.prepare('DELETE FROM artifact_dir_mtimes WHERE artifact_id = ?');
-                        for (const id of artifactsToDelete) {
-                            deleteResourceClassesStmt.run(id);
-                            deleteResourcesStmt.run(id);
-                            deleteClassesStmt.run(id);
-                            deleteInheritanceStmt.run(id);
-                            deleteCallEdgesStmt.run(id);
-                            deleteMtimesStmt.run(id);
-                            deleteArtifactsStmt.run(id);
-                        }
-                    });
+                    pruneArtifacts(db, artifactsToDelete);
                 }
                 pruned = artifactsToDelete.length;
             }

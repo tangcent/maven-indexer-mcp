@@ -176,6 +176,13 @@ const MIGRATIONS: Migration[] = [
   CREATE INDEX IF NOT EXISTS idx_call_edges_caller ON call_edges(caller_class, caller_method);
   CREATE INDEX IF NOT EXISTS idx_call_edges_callee ON call_edges(callee_class, callee_method);`,
   },
+  {
+    version: 10,
+    name: 'index_call_edges_artifact',
+    // Parent-row deletion checks this FK for every artifact, including ones
+    // with no edges. Without an index each cascade scans the whole edge table.
+    sql: 'CREATE INDEX IF NOT EXISTS idx_call_edges_artifact ON call_edges(artifact_id);',
+  },
 ];
 
 export class DB {

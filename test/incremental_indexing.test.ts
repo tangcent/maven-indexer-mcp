@@ -169,7 +169,8 @@ describe('Incremental indexing (T6B.6)', () => {
         // Remove the JAR so the artifact is eligible for pruning.
         fs.unlinkSync(jarPath);
 
-        await indexer.index();
+        const result = await indexer.index();
+        expect(result.pruned).toBe(1);
 
         // Artifact row should be gone.
         expect(indexer.search('lib-a').length).toBe(0);
