@@ -175,4 +175,39 @@ describe('project context', () => {
     expect(unpinned._meta.project.resolution).toBe('cache-wide');
     expect(unpinned._meta.resolved['com.example.Target'].policy).toBe('cache-wide');
   });
+
+  it('pins to the version of the artifact that holds the class, not to the first indexed dependency', async () => {
+    // searchClass keeps one version per groupId:artifactId, so one of the two
+    // versions below is not among its candidates and has to be looked up
+    // exactly. The tree lists another indexed artifact first; only target-lib
+    // can serve the class, so that lookup must use target-lib's version
+    // instead of settling on other-lib.
+    buildArtifact(repoDir, 'com.example', 'other-lib', '1.0.0', 'com.example.Other');
+    await Indexer.getInstance().index();
+
+    for (const version of ['1.0.0', '2.0.0']) {
+      // A project of its own per version: explore caches the context per path.
+      const dir = path.join(projectDir, `v${version}`);
+      fs.mkdirSync(dir);
+      const pomPath = path.join(dir, 'pom.xml');
+      fs.writeFileSync(
+        pomPath,
+        `<project><groupId>com.example</groupId><artifactId>demo</artifactId><version>1.0.0</version>
+         <dependencies>
+           <dependency><groupId>com.example</groupId><artifactId>other-lib</artifactId><version>1.0.0</version></dependency>
+           <dependency><groupId>com.example</groupId><artifactId>target-lib</artifactId><version>${version}</version></dependency>
+         </dependencies></project>`,
+      );
+      try {
+        const pinned = await explore({ identifiers: ['com.example.Target'], projectPath: dir });
+        expect(pinned._meta.resolved['com.example.Target']).toEqual({
+          artifact: `com.example:target-lib:${version}`,
+          policy: 'project-pinned',
+        });
+      } finally {
+        const sidecar = sidecarPathFor(pomPath);
+        if (fs.existsSync(sidecar)) fs.unlinkSync(sidecar);
+      }
+    }
+  });
 });
